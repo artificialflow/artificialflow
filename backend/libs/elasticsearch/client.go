@@ -50,3 +50,19 @@ func NewClient(cfg Config) (*Client, error) {
 func (c *Client) Raw() *elasticsearch.Client {
 	return c.es
 }
+
+// Ready performs a bounded dependency check suitable for readiness probes.
+func (c *Client) Ready(ctx context.Context) error {
+	if c == nil || c.es == nil {
+		return fmt.Errorf("elasticsearch client is not initialized")
+	}
+	res, err := c.es.Info(c.es.Info.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.IsError() {
+		return fmt.Errorf("elasticsearch info returned %s", res.Status())
+	}
+	return nil
+}

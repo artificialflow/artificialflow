@@ -1,44 +1,33 @@
 import { Link, Navigate, Outlet, useLocation } from "react-router";
-import { LayoutDashboard, Layers, Activity, ShieldUser, Menu, X, LogOut, KeyRound, History, Inbox, Scale, AlertTriangle, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, Layers, Activity, ShieldUser, Menu, X, LogOut, History, Scale, AlertTriangle, BarChart3, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { api, type IdentityConfigResponse, type IdentityResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   ARTIFICIALFLOW_ADMIN_ROLE,
+  ARTIFICIALFLOW_ANALYTICS_ROLE,
+  ARTIFICIALFLOW_BUSINESS_ROLE,
   ARTIFICIALFLOW_CLIENT_ROLE,
-  ARTIFICIALFLOW_MODELER_ROLE,
-  hasFlexRole,
   isAdmin,
   isClientOnly,
-  isModeler,
 } from "@/lib/roles";
-import {
-  canAccessIdentityConsole,
-  identityConsoleDeniedMessage,
-  isDashboardPathAllowed,
-  isIdentityConsolePath,
-} from "@/lib/dashboardAccess";
+import { isDashboardPathAllowed } from "@/lib/dashboardAccess";
 import { CqrsStatusBanner } from "@/components/CqrsStatusBanner";
 import { ConsoleAccessDenied } from "@/components/ConsoleAccessDenied";
-
-// Keep in sync with App.tsx — Decisions/DMN UI hidden until the next release train.
-const SHOW_DECISIONS_UI = false;
-// Keep in sync with App.tsx — Incidents UI hidden in the frontend; API remains available.
-const SHOW_INCIDENTS_UI = false;
+import { RUNTIME_UI_CAPABILITIES } from "@/lib/runtime-capabilities";
 
 type SidebarItem = { icon: LucideIcon; label: string; href: string };
 
 const sidebarItems: SidebarItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/" },
   { icon: Layers, label: "Processes", href: "/processes" },
-  ...(SHOW_DECISIONS_UI ? [{ icon: Scale, label: "Decisions", href: "/decisions" }] : []),
+  ...(RUNTIME_UI_CAPABILITIES.decisions ? [{ icon: Scale, label: "Decisions", href: "/decisions" }] : []),
   { icon: Activity, label: "Instances", href: "/instances" },
-  ...(SHOW_INCIDENTS_UI ? [{ icon: AlertTriangle, label: "Incidents", href: "/incidents" }] : []),
-  { icon: Inbox, label: "Task Inbox", href: "/inbox" },
+  ...(RUNTIME_UI_CAPABILITIES.incidents ? [{ icon: AlertTriangle, label: "Incidents", href: "/incidents" }] : []),
   { icon: History, label: "History", href: "/history" },
+  { icon: BarChart3, label: "Analytics", href: "/analytics" },
   { icon: ShieldUser, label: "Identity", href: "/identity" },
-  { icon: KeyRound, label: "SDK Clients", href: "/sdk-clients" },
 ];
 
 type DashboardLayoutProps = {
@@ -52,32 +41,16 @@ export default function DashboardLayout({ onLogout }: DashboardLayoutProps) {
   const [loadingAccess, setLoadingAccess] = useState(true);
   const location = useLocation();
   const admin = isAdmin(identity);
-  const modeler = isModeler(identity);
-  const flexUser = hasFlexRole(identity);
   const clientOnly = isClientOnly(identity);
-  const canShowIdentity = canAccessIdentityConsole(identity, identityConfig);
-  const visibleSidebarItems = sidebarItems.filter((item) => {
-    if (item.href === "/") {
-      return admin;
-    }
-    if (item.href === "/processes" || (SHOW_DECISIONS_UI && item.href === "/decisions")) {
-      return admin || modeler;
-    }
-    if (item.href === "/inbox") {
-      return flexUser && !clientOnly && !admin && !modeler;
-    }
-    if (
-      item.href === "/instances" ||
-      item.href === "/history" ||
-      (SHOW_INCIDENTS_UI && item.href === "/incidents")
-    ) {
-      return admin || (flexUser && !clientOnly);
-    }
-    if (item.href === "/identity" || item.href === "/sdk-clients") {
-      return canShowIdentity;
-    }
-    return false;
-  });
+  const visibleSidebarItems = sidebarItems.filter((item) =>
+    isDashboardPathAllowed({
+      path: item.href,
+      identity,
+      config: identityConfig,
+      showDecisionsUi: RUNTIME_UI_CAPABILITIES.decisions,
+      showIncidentsUi: RUNTIME_UI_CAPABILITIES.incidents,
+    }),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -118,8 +91,8 @@ export default function DashboardLayout({ onLogout }: DashboardLayoutProps) {
         <div className="max-w-lg rounded-lg border bg-card p-6 text-center shadow-sm">
           <h1 className="text-2xl font-bold">Machine Client Access</h1>
           <p className="mt-3 text-sm text-muted-foreground">
-            The {ARTIFICIALFLOW_CLIENT_ROLE} role is reserved for SDK, API, worker, and transaction inbox integrations.
-            Use a human account with {ARTIFICIALFLOW_ADMIN_ROLE}, {ARTIFICIALFLOW_MODELER_ROLE}, or a business role for console access.
+            The {ARTIFICIALFLOW_CLIENT_ROLE} role is reserved for SDK, API and worker integrations.
+            Sign in with an account that has {ARTIFICIALFLOW_ADMIN_ROLE}, {ARTIFICIALFLOW_BUSINESS_ROLE} or {ARTIFICIALFLOW_ANALYTICS_ROLE} for console access.
           </p>
           {onLogout && (
             <Button className="mt-6" variant="outline" onClick={onLogout}>
@@ -138,8 +111,8 @@ export default function DashboardLayout({ onLogout }: DashboardLayoutProps) {
     path,
     identity,
     config: identityConfig,
-    showDecisionsUi: SHOW_DECISIONS_UI,
-    showIncidentsUi: SHOW_INCIDENTS_UI,
+    showDecisionsUi: RUNTIME_UI_CAPABILITIES.decisions,
+    showIncidentsUi: RUNTIME_UI_CAPABILITIES.incidents,
   });
 
   if (path === "/" && firstAllowedPath && firstAllowedPath !== "/") {
@@ -147,9 +120,7 @@ export default function DashboardLayout({ onLogout }: DashboardLayoutProps) {
   }
 
   if (!isAllowedPath) {
-    const message = isIdentityConsolePath(path)
-      ? identityConsoleDeniedMessage(identity, identityConfig)
-      : "Your ArtificialFlow role does not allow this page. Administrators have full access (including Identity and SDK Clients in bundled ZITADEL mode), modelers can use Processes and Modeler, and business users can use Instances, History, and Task Inbox.";
+    const message = `Your ArtificialFlow role does not allow this page. ${ARTIFICIALFLOW_ADMIN_ROLE} has full access, ${ARTIFICIALFLOW_BUSINESS_ROLE} can use Processes, Decisions and Modeler, and ${ARTIFICIALFLOW_ANALYTICS_ROLE} can use Analytics. Roles are assigned in your OIDC provider.`;
     return (
       <ConsoleAccessDenied
         message={message}

@@ -1,0 +1,392 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "AF-RELEASE-EVIDENCE-V1",
+  "defaultRetentionDays": 365,
+  "allowedRequiredStatuses": [
+    "pass"
+  ],
+  "gates": [
+    {
+      "id": "REL-001",
+      "title": "Release identity and workflow policy",
+      "command": "node scripts/validate_release_workflows.mjs && python3 scripts/release/evidence.py validate-manifest",
+      "job": "release-evidence / validate",
+      "requiredEnvironment": [
+        "git",
+        "node>=22",
+        "python>=3.11"
+      ],
+      "fixture": {
+        "kind": "git-tree",
+        "identity": "GITHUB_SHA"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-001.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 300,
+      "retries": 0,
+      "threshold": {
+        "failures": 0
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 24
+    },
+    {
+      "id": "REL-002",
+      "title": "Pinned candidate architecture and digest",
+      "command": "bash scripts/release/verify_candidate_images.sh",
+      "job": "release-evidence / candidate-images",
+      "requiredEnvironment": [
+        "docker-buildx",
+        "registry-auth",
+        "CANDIDATE_IMAGE_LOCK"
+      ],
+      "fixture": {
+        "kind": "image-lock",
+        "identity": "sha256"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-002.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 900,
+      "retries": 1,
+      "threshold": {
+        "architectures": [
+          "linux/amd64",
+          "linux/arm64"
+        ],
+        "digestMismatches": 0
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 24
+    },
+    {
+      "id": "REL-003",
+      "title": "Kind Helm install upgrade rollback",
+      "command": "bash scripts/release/kind_helm_smoke.sh",
+      "job": "release-evidence / kind-helm",
+      "requiredEnvironment": [
+        "docker",
+        "kind=0.29.0",
+        "kubectl",
+        "helm>=3.18",
+        "registry-auth",
+        "KIND_VALUES_FILE"
+      ],
+      "fixture": {
+        "kind": "helm-chart+reference-topology",
+        "identity": "charts/artificialflow/Chart.yaml+KIND_VALUES_FILE@sha256"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-003.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 3600,
+      "retries": 0,
+      "threshold": {
+        "failedRollouts": 0,
+        "networkPolicyEnforced": true
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-004",
+      "title": "Pod kill recovery",
+      "command": "CHAOS_SCENARIO=pod-kill bash scripts/release/chaos.sh",
+      "job": "release-evidence / chaos",
+      "requiredEnvironment": [
+        "kubectl",
+        "release-kind-cluster"
+      ],
+      "fixture": {
+        "kind": "candidate-digests",
+        "identity": "CANDIDATE_IMAGE_LOCK"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-004.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 900,
+      "retries": 0,
+      "threshold": {
+        "recoverySecondsMax": 300,
+        "dataLoss": 0
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-005",
+      "title": "Kafka interruption recovery",
+      "command": "CHAOS_SCENARIO=kafka bash scripts/release/chaos.sh",
+      "job": "release-evidence / chaos",
+      "requiredEnvironment": [
+        "kubectl",
+        "release-kind-cluster"
+      ],
+      "fixture": {
+        "kind": "candidate-digests",
+        "identity": "CANDIDATE_IMAGE_LOCK"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-005.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 1200,
+      "retries": 0,
+      "threshold": {
+        "recoverySecondsMax": 600,
+        "projectionParity": true
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-006",
+      "title": "Sync worker outage recovery",
+      "command": "CHAOS_SCENARIO=sync-outage bash scripts/release/chaos.sh",
+      "job": "release-evidence / chaos",
+      "requiredEnvironment": [
+        "kubectl",
+        "release-kind-cluster"
+      ],
+      "fixture": {
+        "kind": "candidate-digests",
+        "identity": "CANDIDATE_IMAGE_LOCK"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-006.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 1200,
+      "retries": 0,
+      "threshold": {
+        "recoverySecondsMax": 600,
+        "projectionParity": true
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-007",
+      "title": "Unchanged-digest load and soak",
+      "command": "bash scripts/release/run_soak.sh",
+      "job": "release-evidence / soak",
+      "requiredEnvironment": [
+        "k6=0.57.0",
+        "release-kind-cluster",
+        "AUTH_TOKEN",
+        "WORKFLOW_ID"
+      ],
+      "fixture": {
+        "kind": "load-profile",
+        "path": "tests/performance/profiles/release-soak-v1.json",
+        "sha256": "8e3554221f0023513c05ac64b005aa9dd6ddd22794d654b7c602772f910fcfd6"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-007.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 18000,
+      "retries": 0,
+      "threshold": {
+        "minimumSamples": 480,
+        "minimumRequests": 100000,
+        "digestChanges": 0
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-008",
+      "title": "Backup restore integrity",
+      "command": "MODE=backup-restore bash scripts/release/data_recovery_gate.sh",
+      "job": "release-evidence / data-recovery",
+      "requiredEnvironment": [
+        "kubectl",
+        "pg_dump",
+        "psql",
+        "release-kind-cluster"
+      ],
+      "fixture": {
+        "kind": "release-dataset",
+        "identity": "dataset-manifest@sha256"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-008.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 3600,
+      "retries": 0,
+      "threshold": {
+        "rowCountMismatch": 0,
+        "checksumMismatch": 0
+      },
+      "blocking": true,
+      "retentionDays": 730,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-009",
+      "title": "Projection rebuild and parity",
+      "command": "MODE=projection-rebuild bash scripts/release/data_recovery_gate.sh",
+      "job": "release-evidence / data-recovery",
+      "requiredEnvironment": [
+        "kubectl",
+        "release-kind-cluster",
+        "PROJECTION_REBUILD_COMMAND"
+      ],
+      "fixture": {
+        "kind": "release-dataset",
+        "identity": "dataset-manifest@sha256"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-009.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 3600,
+      "retries": 0,
+      "threshold": {
+        "countMismatch": 0,
+        "keyMismatch": 0
+      },
+      "blocking": true,
+      "retentionDays": 730,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-010",
+      "title": "Two clean post-soak functional suites",
+      "command": "bash scripts/release/post_soak_functional.sh",
+      "job": "release-evidence / post-soak-functional",
+      "requiredEnvironment": [
+        "release-kind-cluster",
+        "REL-007 evidence"
+      ],
+      "fixture": {
+        "kind": "candidate-digests",
+        "identity": "CANDIDATE_IMAGE_LOCK"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-010.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 10800,
+      "retries": 0,
+      "threshold": {
+        "cleanRuns": 2,
+        "failures": 0,
+        "skips": 0
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 168
+    },
+    {
+      "id": "REL-011",
+      "title": "Blocking security policy",
+      "command": "bash scripts/release/security_gate.sh",
+      "job": "security",
+      "requiredEnvironment": [
+        "go",
+        "npm",
+        "docker-buildx",
+        "cosign",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REF",
+        "gitleaks=8.30.1",
+        "gosec=2.22.8",
+        "trivy=0.65.0"
+      ],
+      "fixture": {
+        "kind": "git-tree",
+        "identity": "GITHUB_SHA"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-011.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 3600,
+      "retries": 0,
+      "threshold": {
+        "high": 0,
+        "critical": 0,
+        "secretLeaks": 0
+      },
+      "blocking": true,
+      "retentionDays": 365,
+      "maxAgeHours": 24
+    },
+    {
+      "id": "REL-012",
+      "title": "Published bytes and post-publish smoke",
+      "phase": "post-publish",
+      "command": "bash scripts/release/post_publish_smoke.sh",
+      "job": "release / post-publish-smoke",
+      "requiredEnvironment": [
+        "registry-auth",
+        "npm",
+        "docker-buildx",
+        "CANDIDATE_IMAGE_LOCK"
+      ],
+      "fixture": {
+        "kind": "promoted-release",
+        "identity": "release-tag+candidate-lock"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-012.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 3600,
+      "retries": 1,
+      "threshold": {
+        "digestMismatches": 0,
+        "packageIntegrityMismatches": 0,
+        "smokeFailures": 0
+      },
+      "blocking": true,
+      "retentionDays": 730,
+      "maxAgeHours": 24
+    },
+    {
+      "id": "REL-013",
+      "title": "Database interruption and fenced recovery",
+      "command": "CHAOS_SCENARIO=database bash scripts/release/chaos.sh",
+      "job": "release-evidence / chaos",
+      "requiredEnvironment": [
+        "kubectl",
+        "release-kind-cluster",
+        "DATABASE_RESOURCE",
+        "CHAOS_ASSERT_COMMAND"
+      ],
+      "fixture": {
+        "kind": "candidate-digests",
+        "identity": "CANDIDATE_IMAGE_LOCK"
+      },
+      "artifact": {
+        "path": "reports/evidence/REL-013.json",
+        "identity": "sha256"
+      },
+      "timeoutSeconds": 1200,
+      "retries": 0,
+      "threshold": {
+        "recoverySecondsMax": 600,
+        "dataLoss": 0,
+        "duplicateDurableTransitions": 0
+      },
+      "blocking": true,
+      "retentionDays": 730,
+      "maxAgeHours": 168
+    }
+  ]
+}

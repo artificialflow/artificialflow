@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "inventoryId": "AF-RELEASE-ARTIFACTS-V1",
+  "containerImages": [
+    {"name": "workflow-command", "dockerfile": "backend/Dockerfile", "sbom": true, "provenance": true, "signature": "cosign-keyless"},
+    {"name": "workflow-runtime", "dockerfile": "backend/Dockerfile.runtime", "sbom": true, "provenance": true, "signature": "cosign-keyless"},
+    {"name": "workflow-query", "dockerfile": "backend/Dockerfile.workflow-query", "sbom": true, "provenance": true, "signature": "cosign-keyless"},
+    {"name": "sync-worker", "dockerfile": "backend/Dockerfile.sync-worker", "sbom": true, "provenance": true, "signature": "cosign-keyless"},
+    {"name": "frontend", "dockerfile": "frontend/Dockerfile", "sbom": true, "provenance": true, "signature": "cosign-keyless"}
+  ],
+  "helmCharts": [
+    {"name": "artificialflow", "path": "charts/artificialflow", "package": "artificialflow-${VERSION}.tgz", "provenance": true, "signature": "cosign-blob-keyless"}
+  ],
+  "sdks": [
+    {"ecosystem": "npm", "name": "@artificialflow/nodejs-sdk", "path": "clients/nodejs-sdk", "sbom": "cyclonedx", "provenance": true},
+    {"ecosystem": "nuget", "name": "ArtificialFlow.Sdk", "path": "clients/dotnet-sdk", "sbom": "cyclonedx", "provenance": true},
+    {"ecosystem": "maven", "name": "io.artificialflow:artificialflow-sdk", "path": "clients/java-sdk", "sbom": "cyclonedx", "provenance": true}
+  ],
+  "releaseMetadata": [
+    {"name": "release-notes", "source": "CHANGELOG.md", "required": true},
+    {"name": "candidate-image-lock", "path": "reports/candidate-images.json", "required": true},
+    {"name": "candidate-package-lock", "path": "reports/candidate-packages.json", "required": true},
+    {"name": "release-evidence-report", "path": "reports/release-evidence.md", "required": true},
+    {"name": "release-evidence-json", "path": "reports/evidence", "required": true}
+  ]
+}

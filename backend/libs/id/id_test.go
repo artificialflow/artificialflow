@@ -6,6 +6,42 @@ import (
 	"time"
 )
 
+func TestResolveSnowflakeNodeID(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit string
+		podName  string
+		want     int64
+		wantErr  bool
+	}{
+		{name: "explicit", explicit: "42", podName: "command-3", want: 42},
+		{name: "stateful set ordinal zero", podName: "artificialflow-command-0", want: 1},
+		{name: "stateful set ordinal one", podName: "artificialflow-command-1", want: 2},
+		{name: "standalone default", want: 1},
+		{name: "invalid explicit", explicit: "node-1", wantErr: true},
+		{name: "explicit out of range", explicit: "1024", wantErr: true},
+		{name: "deployment pod name rejected", podName: "artificialflow-command-7d9f8c-x2abc", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := id.ResolveSnowflakeNodeID(tt.explicit, tt.podName)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveSnowflakeNodeID() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ResolveSnowflakeNodeID() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSnowflakeGeneration(t *testing.T) {
 	// Initialize default node
 	id.InitDefaultNode(1)

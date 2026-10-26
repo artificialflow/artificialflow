@@ -310,10 +310,12 @@ func (e *Engine) proceedToken(ctx context.Context, instance *model.WorkflowInsta
 				EndTime: time.Now(),
 			}
 			if err := e.repo.UpdateElementInstance(ctx, el); err != nil {
-				// log error?
+				return err
 			}
 			// Cancel pending boundary timers attached to this activity instance.
-			e.cancelCreatedTimersForElementInstance(ctx, key)
+			if err := e.cancelCreatedTimersForElementInstance(ctx, key, 0); err != nil {
+				return err
+			}
 		}
 	}
 

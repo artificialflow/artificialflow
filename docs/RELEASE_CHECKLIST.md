@@ -8,7 +8,7 @@ Use this checklist before publishing an ArtificialFlow public release.
 - Confirm `.git` history is clean and the default branch has branch protection.
 - Enable required status checks for CI, security, CodeQL, and release dry-runs.
 - Enable Dependabot alerts, secret scanning, and code scanning.
-- Add repository topics: `bpmn`, `workflow-engine`, `workflow-automation`, `golang`, `typescript`, `react`, `docker`, `oidc`, `zitadel`, `sdk`.
+- Add repository topics: `bpmn`, `workflow-engine`, `workflow-automation`, `golang`, `typescript`, `react`, `docker`, `oidc`, `sdk`.
 - Open the GitHub Actions tab and confirm workflows can start jobs. If runs fail immediately with `startup_failure` and zero jobs, resolve any account, billing, or Actions enablement banner before release validation.
 
 ## 2. Secret and dependency checks
@@ -20,14 +20,11 @@ npm --prefix clients/nodejs-sdk audit --audit-level=high
 go test ./backend/... -count=1
 ```
 
-Do not publish if any real `.env`, PAT, ZITADEL token, private key, client secret, or local credential is present in tracked files or release artifacts.
+Do not publish if any real `.env`, PAT, OIDC token, private key, client secret, or local credential is present in tracked files or release artifacts.
 
-For bundled ZITADEL releases:
-
-- Confirm new SDK clients receive browser-generated private-key profiles and no PAT.
-- Confirm JWT Profile exchange, project audience, `artificialflow client`, SDK refresh, overlapping key rotation, and key revocation.
-- Confirm legacy PAT issuance/rotation defaults remain disabled and inventory/revocation still works.
-- Confirm UAT reports, screenshots, traces, and logs contain no private key, assertion, access token, PAT, or authorization header.
+- Confirm SDK clients use OAuth client credentials against the configured provider.
+- Confirm `artificialflowclient` tokens include the ArtificialFlow audience and role claim.
+- Confirm UAT reports, screenshots, traces, and logs contain no private key, access token, or authorization header.
 
 ## 3. Local validation
 
@@ -36,15 +33,16 @@ actionlint -color=false
 node scripts/validate_legacy_branding.mjs
 node scripts/validate_release_version.mjs
 node scripts/validate_release_workflows.mjs
+python3 scripts/release/evidence.py validate-manifest
 make test-release-suite
-# With a healthy stack (after make up-zitadel):
+# With a healthy stack (after make up):
 make test-all
 make test-all-functionality
 make test-dast
 make test-uat-mega-bpmn   # needs ARTIFICIALFLOW_TOKEN
 make test-perf            # needs AUTH_TOKEN + WORKFLOW_ID
-make smoke-profiles
-make smoke-release-profiles
+make smoke
+make smoke-release
 bash scripts/validate_compose_identities.sh
 make validate-helm
 npm --prefix frontend ci
@@ -59,6 +57,7 @@ bash scripts/validate_nodejs_sdk_install.sh
 bash scripts/validate_generated_proto.sh
 (cd clients/nodejs-sdk && npm sbom --sbom-format cyclonedx --omit dev >/tmp/artificialflow-nodejs-sdk-sbom.cdx.json)
 bash scripts/validate_migration_release.sh
+make test-schema-migrations
 make release-dry-run
 go test ./backend/... -count=1
 ```
@@ -67,9 +66,16 @@ go test ./backend/... -count=1
 
 ```bash
 helm lint ./charts/artificialflow
-helm template artificialflow ./charts/artificialflow -f ./charts/artificialflow/values-external-iam.yaml >/tmp/artificialflow-external.yaml
-helm template artificialflow ./charts/artificialflow -f ./charts/artificialflow/values-internal-iam.yaml >/tmp/artificialflow-internal.yaml
+helm template artificialflow ./charts/artificialflow >/tmp/artificialflow-default.yaml
+helm template artificialflow ./charts/artificialflow -f ./charts/artificialflow/values-kind-smoke.yaml >/tmp/artificialflow-kind.yaml
+helm template artificialflow ./charts/artificialflow -f ./charts/artificialflow/examples/values-managed-deps.yaml >/tmp/artificialflow-managed.yaml
 ```
+
+The schema migration gate must prove ordered migration loading, checksum-drift
+rejection, already-applied behavior, and startup schema validation. The Docker
+evidence test must additionally pass against both an empty database and the
+v1.1.0 baseline fixture. Review migration SQL for expand/contract compatibility
+and verify the Debezium-captured singular table names are unchanged.
 
 ## 4. Docker Hub setup
 
@@ -111,11 +117,11 @@ tagging to reduce partial publication risk.
 Validate the intended release tag before publication:
 
 ```bash
-node scripts/validate_release_version.mjs --tag v1.1.0
+node scripts/validate_release_version.mjs --tag v1.2.0
 ```
 
 Before pushing it, run
-`node scripts/validate_release_version.mjs --tag v1.1.0`. The package,
+`node scripts/validate_release_version.mjs --tag v1.2.0`. The package,
 lockfile, chart, Compose defaults, changelog, and documented release version
 must already match the tag.
 
@@ -125,38 +131,42 @@ stable versions publish with `latest`. The deprecated wrapper job starts only
 after the canonical publish job succeeds.
 
 Tag pushes and publish-enabled manual runs must start the top-level `Release`
-workflow. It calls the reusable image workflow first and starts the npm workflow
-only after all five candidate builds pass Trivy, promotion digest checks,
-canonical/legacy signature verification, and complete-set verification. The
-image workflow publishes deterministic candidate references before scanning and
-promotes only the scanned digest to final tags, so a retry can reuse the
+workflow. A tag builds and scans deterministic candidates but does not promote
+them. The dedicated production-evidence runner must complete every pre-publish
+gate in `release/evidence-gates.json`; missing, stale, skipped, warning, flaky,
+or SHA-mismatched required evidence blocks the run. Promotion then waits for
+approval on the protected `release-production` environment. The image workflow
+promotes only the already-tested digest to final tags, so a retry can reuse the
 candidate and accepts an existing final tag only when its digest matches.
-Direct `Release Docker Images` manual runs remain available for image-only
-validation or publication. Direct `Release Node.js SDK` manual runs are
+The npm package is packed once, locked by integrity and SHA-256, and that exact
+tarball is published only after image promotion.
+Direct `Release Docker Images` manual runs may build candidate references but
+cannot promote them. Direct `Release Node.js SDK` manual runs are
 validation-only; a publish-enabled direct run is refused because it has no
-image-workflow dependency.
+image-workflow dependency. After publication, the workflow verifies registry
+digests and npm integrity against the candidate locks, executes the published
+artifact smoke, and generates the final retained evidence report.
 
 ## 7. Published image smoke
 
 After images are pushed, validate the release override:
 
 ```bash
-ARTIFICIALFLOW_IMAGE_TAG=v1.1.0 make smoke-release-profiles
-ARTIFICIALFLOW_IMAGE_TAG=v1.1.0 make up-zitadel-release
+ARTIFICIALFLOW_IMAGE_TAG=v1.2.0 make smoke-release
+ARTIFICIALFLOW_IMAGE_TAG=v1.2.0 make up-release
 ```
 
 Open:
 
 - ArtificialFlow: <http://localhost:9100>
-- ZITADEL: <http://localhost:9180>
 
-Sign in with local development credentials `admin` / `admin` and run the SDK smoke test with a generated SDK token.
+Sign in through the configured OIDC provider and run an SDK smoke test with a `client_credentials` token.
 
 ## 8. Final release
 
 ```bash
-git tag -s v1.1.0 -m "ArtificialFlow v1.1.0"
-git push origin v1.1.0
+git tag -s v1.2.0 -m "ArtificialFlow v1.2.0"
+git push origin v1.2.0
 ```
 
 Publish GitHub release notes with:

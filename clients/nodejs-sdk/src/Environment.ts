@@ -3,7 +3,6 @@ export type ArtificialFlowEnvironmentSource = Record<string, string | undefined>
 export interface ArtificialFlowEnvironmentConfig {
     baseUrl: string;
     token: string;
-    zitadelProfileFile: string;
     workflowKey: string;
     businessKey: string;
     messageName: string;
@@ -33,7 +32,6 @@ export function resolveArtificialFlowEnvironment(
             || environment.ARTIFICIALFLOW_API_URL?.trim()
             || 'http://localhost:9100/api',
         token: read('ARTIFICIALFLOW_TOKEN'),
-        zitadelProfileFile: read('ARTIFICIALFLOW_ZITADEL_PROFILE_FILE'),
         workflowKey: read(
             'ARTIFICIALFLOW_WORKFLOW_KEY',
             '<WORKFLOW_DEFINITION_KEY_OR_ID_TO_START>',

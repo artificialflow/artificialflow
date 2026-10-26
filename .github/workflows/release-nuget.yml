@@ -1,0 +1,95 @@
+name: Release NuGet SDK
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag that must match the package version
+        required: true
+        type: string
+      publish:
+        description: Publish to NuGet instead of running validation only
+        required: true
+        type: boolean
+      images_verified:
+        description: The required image reusable workflow completed successfully
+        required: true
+        type: boolean
+    secrets:
+      NUGET_API_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to validate
+        required: true
+        default: v1.2.0
+      publish:
+        description: Direct publication is refused; use the Release orchestrator
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-nuget-${{ inputs.tag }}-${{ inputs.publish }}
+  cancel-in-progress: false
+
+jobs:
+  release-preflight:
+    name: Validate release identity and orchestration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse NuGet publication without completed image workflow
+        if: ${{ inputs.publish && !inputs.images_verified }}
+        run: |
+          echo "NuGet publication must run through .github/workflows/release.yml after the image workflow succeeds" >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+
+      - name: Validate branding, version, and publication order
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          node scripts/validate_legacy_branding.mjs
+          node scripts/validate_release_version.mjs
+          node scripts/validate_release_workflows.mjs
+
+  publish-dotnet-sdk:
+    name: Publish ArtificialFlow.Sdk
+    needs: release-preflight
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/dotnet-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.x"
+
+      - name: Test and pack
+        run: |
+          dotnet test ArtificialFlow.Sdk.sln
+          dotnet pack src/ArtificialFlow.Sdk/ArtificialFlow.Sdk.csproj -c Release -o artifacts
+
+      - name: Publish
+        if: ${{ inputs.publish }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          test -n "${NUGET_API_KEY}"
+          dotnet nuget push artifacts/*.nupkg --api-key "${NUGET_API_KEY}" --source https://api.nuget.org/v3/index.json --skip-duplicate

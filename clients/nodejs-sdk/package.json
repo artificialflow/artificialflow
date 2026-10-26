@@ -1,6 +1,6 @@
 {
   "name": "@artificialflow/nodejs-sdk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Node.js SDK for ArtificialFlow workflow, worker, identity, and management APIs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,6 +9,7 @@
     "generate": "./generate_proto.sh",
     "start:sample": "ts-node sample/index.ts",
     "test": "npm run build && node test/auth.test.js && node test/client.test.js",
+    "validate:openapi": "node ../../scripts/validate_api_sdk_contract.mjs",
     "validate:package": "node ../../scripts/validate_nodejs_sdk_package.mjs",
     "prepack": "npm run build"
   },
@@ -45,7 +46,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.1",
     "typescript": "^5.9.3"
   },

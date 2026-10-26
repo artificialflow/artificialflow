@@ -1,4 +1,4 @@
-FROM golang:1.25.12-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,10 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 ARG REVISION=unknown
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.revision=${REVISION}" -o workflow-command backend/services/workflow-command/cmd/server/main.go
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.revision=${REVISION}" -o workflow-command backend/services/workflow-command/cmd/server/main.go \
+    && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o workflow-migrate backend/services/workflow-command/cmd/migrate/main.go
 
 FROM alpine:3.22
 
@@ -24,6 +27,7 @@ RUN addgroup -S -g "${APP_GID}" "${APP_USER}" \
     && adduser -S -D -H -u "${APP_UID}" -G "${APP_USER}" "${APP_USER}"
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 COPY --from=builder /app/workflow-command .
+COPY --from=builder /app/workflow-migrate .
 USER ${APP_USER}
 
 EXPOSE 8080

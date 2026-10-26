@@ -1,0 +1,143 @@
+{{- if .Values.monitoring.enabled }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- range $component := list "command" "query" "runtime" "sync-worker" }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "artificialflow.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "artificialflow.labels" $ | nindent 4 }}
+    {{- with $.Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "artificialflow.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  endpoints:
+    - port: {{ ternary "http" "metrics" (eq $component "sync-worker") }}
+      path: /metrics
+      interval: {{ $.Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ $.Values.monitoring.serviceMonitor.scrapeTimeout }}
+---
+{{- end }}
+{{- end }}
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "artificialflow.fullname" . }}
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: artificialflow.readiness
+      rules:
+        - alert: ArtificialFlowDependencyUnavailable
+          expr: artificialflow_dependency_ready == 0
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "ArtificialFlow dependency is unavailable"
+            runbook_url: {{ printf "%s#dependency-readiness" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowSchemaIncompatible
+          expr: artificialflow_schema_ready == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "ArtificialFlow binary and database schema are incompatible"
+            runbook_url: {{ printf "%s#schema-readiness" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+    - name: artificialflow.slo
+      rules:
+        - alert: ArtificialFlowCommandErrorBudgetBurn
+          expr: |
+            sum(rate(artificialflow_http_requests_total{service="workflow-command",status=~"5.."}[5m]))
+              / clamp_min(sum(rate(artificialflow_http_requests_total{service="workflow-command"}[5m])), 0.001) > 0.001
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Command API exceeds the 0.1% 5xx objective"
+            runbook_url: {{ printf "%s#api-slo-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowQueryErrorBudgetBurn
+          expr: |
+            sum(rate(artificialflow_http_requests_total{service="workflow-query",status=~"5.."}[5m]))
+              / clamp_min(sum(rate(artificialflow_http_requests_total{service="workflow-query"}[5m])), 0.001) > 0.001
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Query API exceeds the 0.1% 5xx objective"
+            runbook_url: {{ printf "%s#api-slo-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowCommandLatencyHigh
+          expr: histogram_quantile(0.95, sum by (le) (rate(artificialflow_http_request_duration_seconds_bucket{service="workflow-command"}[10m]))) > 0.15
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Command API p95 latency exceeds 150ms"
+            runbook_url: {{ printf "%s#api-slo-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowQueryLatencyHigh
+          expr: histogram_quantile(0.95, sum by (le) (rate(artificialflow_http_request_duration_seconds_bucket{service="workflow-query"}[10m]))) > 0.75
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Query API p95 latency exceeds 750ms"
+            runbook_url: {{ printf "%s#api-slo-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+    - name: artificialflow.durable-work
+      rules:
+        - alert: ArtificialFlowOutboxBacklog
+          expr: artificialflow_outbox_pending > 1000 or artificialflow_outbox_publish_lag_seconds > 60
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Outbox backlog or oldest age is high"
+            runbook_url: {{ printf "%s#outbox-and-projection-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowOutboxDeadLetters
+          expr: increase(artificialflow_outbox_dead_letters_total[10m]) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "Outbox messages exhausted publication attempts"
+            runbook_url: {{ printf "%s#outbox-and-projection-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowProjectionStale
+          expr: artificialflow_projection_freshness_seconds > 120
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Projection consumer has not processed an event recently"
+            runbook_url: {{ printf "%s#outbox-and-projection-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowProjectionDeadLetters
+          expr: increase(artificialflow_projection_dead_letters_total[10m]) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "Projection messages were dead-lettered"
+            runbook_url: {{ printf "%s#outbox-and-projection-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowRuntimeFencingFailures
+          expr: increase(artificialflow_runtime_failures_total{reason=~"claim|fence"}[10m]) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "Runtime lost or failed a fenced claim"
+            runbook_url: {{ printf "%s#runtime-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+        - alert: ArtificialFlowRuntimeWorkLag
+          expr: artificialflow_work_lag_seconds{service="workflow-runtime",kind=~"timer|job"} > 30
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Runtime timer or job work is more than 30 seconds overdue"
+            runbook_url: {{ printf "%s#runtime-alerts" .Values.monitoring.prometheusRule.runbookBaseUrl | quote }}
+{{- end }}
+{{- if .Values.monitoring.grafanaDashboard.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "artificialflow.fullname" . }}-grafana-dashboard
+  labels:
+    {{ .Values.monitoring.grafanaDashboard.label }}: {{ .Values.monitoring.grafanaDashboard.labelValue | quote }}
+    {{- include "artificialflow.labels" . | nindent 4 }}
+data:
+  artificialflow-overview.json: |-
+{{ .Files.Get "dashboards/artificialflow-overview.json" | indent 4 }}
+{{- end }}
+{{- end }}

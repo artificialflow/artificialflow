@@ -1,19 +1,16 @@
 FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
-WORKDIR /app
+WORKDIR /app/frontend
 
-COPY package.json package-lock.json ./
+COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
-COPY . .
+COPY frontend/ ./
+COPY connectors/internal/common/descriptors.json /app/connectors/internal/common/descriptors.json
 
 ARG VITE_API_URL
-ARG VITE_OIDC_AUTHORITY
-ARG VITE_OIDC_CLIENT_ID
 
 ENV VITE_API_URL=$VITE_API_URL
-ENV VITE_OIDC_AUTHORITY=$VITE_OIDC_AUTHORITY
-ENV VITE_OIDC_CLIENT_ID=$VITE_OIDC_CLIENT_ID
 
 RUN npm run build
 
@@ -24,9 +21,9 @@ ARG REVISION=unknown
 
 RUN apk upgrade --no-cache
 
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY entrypoint.sh /entrypoint.sh
+COPY --from=builder /app/frontend/dist /usr/share/nginx/html
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY frontend/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh
 

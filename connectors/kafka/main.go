@@ -11,8 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/artificialflow/artificialflow/backend/libs/model"
-	"github.com/artificialflow/artificialflow/backend/libs/worker"
 	"github.com/artificialflow/artificialflow/connectors/internal/common"
 	"github.com/segmentio/kafka-go"
 )
@@ -24,22 +22,12 @@ func main() {
 	token := os.Getenv("ARTIFICIALFLOW_TOKEN")
 	brokers := strings.Split(common.EnvOr("KAFKA_BROKERS", "localhost:9092"), ",")
 
-	client, err := worker.NewClient(worker.ClientConfig{BaseURL: baseURL, BearerToken: token})
-	if err != nil {
-		log.Fatal(err)
-	}
-	w, err := worker.NewWorker(client, worker.WorkerConfig{
-		JobType:         jobType,
-		WorkerName:      common.EnvOr("WORKER_NAME", "kafka-connector"),
-		MaxJobs:         5,
-		ActivateTimeout: 5 * time.Second,
-		LockDuration:    60 * time.Second,
-		Handler: func(ctx context.Context, job model.Job) (map[string]any, error) {
-			vars, err := common.LoadInstanceVars(ctx, baseURL, token, job.ProcessInstanceKey)
-			if err != nil {
-				return nil, err
-			}
-			return publishKafka(ctx, brokers, vars)
+	runtime, err := common.NewRuntime(common.RuntimeConfig{
+		BaseURL: baseURL, Token: token, JobType: jobType,
+		WorkerName: common.EnvOr("WORKER_NAME", "kafka-connector"),
+		MaxJobs:    5, LockDuration: 60 * time.Second,
+		Execute: func(ctx context.Context, inputs map[string]any) (map[string]any, error) {
+			return publishKafka(ctx, brokers, inputs)
 		},
 	})
 	if err != nil {
@@ -48,7 +36,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("kafka connector listening for %s brokers=%v", jobType, brokers)
-	if err := w.Run(ctx); err != nil && err != context.Canceled {
+	if err := runtime.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
 }
@@ -89,8 +77,8 @@ func publishKafka(ctx context.Context, brokers []string, vars map[string]any) (m
 		return nil, err
 	}
 	return map[string]any{
-		"kafkaTopic":   topic,
-		"kafkaBytes":   len(value),
+		"kafkaTopic":     topic,
+		"kafkaBytes":     len(value),
 		"kafkaPublished": true,
 	}, nil
 }

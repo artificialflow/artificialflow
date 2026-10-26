@@ -1,0 +1,143 @@
+name: Release Production Evidence
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      candidate_artifact:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+        default: v1.2.0
+      candidate_artifact:
+        required: true
+        default: candidate-images-false
+
+permissions:
+  contents: read
+
+jobs:
+  release-evidence:
+    name: Execute production evidence manifest
+    runs-on: [self-hosted, linux, release-evidence]
+    timeout-minutes: 355
+    environment:
+      name: release-evidence
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download immutable candidate lock
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: reports
+
+      - name: Verify pinned release toolchain
+        run: |
+          set -euo pipefail
+          kind version | grep -F 'v0.29.0'
+          k6 version | grep -E 'v?0\.57\.0([[:space:]]|$)'
+          gitleaks version | grep -F '8.30.1'
+          govulncheck -version | grep -F 'v1.1.4'
+          gosec -version | grep -F 'Version: 2.22.8'
+          trivy --version | grep -F 'Version: 0.65.0'
+          cosign version
+          helm version --short
+          kubectl version --client
+          docker buildx version
+
+      - name: Record release policy validation
+        run: |
+          set -euo pipefail
+          started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          python3 scripts/release/evidence.py validate-manifest
+          node scripts/validate_release_workflows.mjs
+          bash scripts/release/record_evidence.sh REL-001 pass "${started_at}" \
+            release/evidence-gates.json release/artifact-inventory.json
+
+      - name: Install, upgrade, rollback, and enforce network policy
+        env:
+          CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
+          KIND_VALUES_FILE: ${{ vars.KIND_VALUES_FILE }}
+          KIND_WORKER_COUNT: "2"
+          KEEP_KIND_CLUSTER: "true"
+        run: bash scripts/release/kind_helm_smoke.sh
+
+      - name: Execute recovery chaos
+        env:
+          CHAOS_ASSERT_COMMAND: ${{ vars.CHAOS_ASSERT_COMMAND }}
+          KAFKA_RESOURCE: ${{ vars.KAFKA_RESOURCE }}
+          SYNC_RESOURCE: ${{ vars.SYNC_RESOURCE }}
+          DATABASE_RESOURCE: ${{ vars.DATABASE_RESOURCE }}
+        run: |
+          set -euo pipefail
+          CHAOS_SCENARIO=pod-kill bash scripts/release/chaos.sh
+          CHAOS_SCENARIO=kafka bash scripts/release/chaos.sh
+          CHAOS_SCENARIO=sync-outage bash scripts/release/chaos.sh
+          CHAOS_SCENARIO=database bash scripts/release/chaos.sh
+
+      - name: Execute unchanged-digest soak
+        env:
+          CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
+          AUTH_TOKEN: ${{ secrets.RELEASE_AUTH_TOKEN }}
+          WORKFLOW_ID: ${{ vars.RELEASE_WORKFLOW_ID }}
+          COMMAND_URL: ${{ vars.RELEASE_COMMAND_URL }}
+          QUERY_URL: ${{ vars.RELEASE_QUERY_URL }}
+        run: bash scripts/release/run_soak.sh
+
+      - name: Execute backup restore and projection rebuild
+        env:
+          BACKUP_COMMAND: ${{ vars.BACKUP_COMMAND }}
+          RESTORE_COMMAND: ${{ vars.RESTORE_COMMAND }}
+          BACKUP_ARTIFACT: ${{ vars.BACKUP_ARTIFACT }}
+          DATASET_FINGERPRINT_COMMAND: ${{ vars.DATASET_FINGERPRINT_COMMAND }}
+          PROJECTION_REBUILD_COMMAND: ${{ vars.PROJECTION_REBUILD_COMMAND }}
+          PROJECTION_PARITY_COMMAND: ${{ vars.PROJECTION_PARITY_COMMAND }}
+        run: |
+          set -euo pipefail
+          MODE=backup-restore bash scripts/release/data_recovery_gate.sh
+          MODE=projection-rebuild bash scripts/release/data_recovery_gate.sh
+
+      - name: Execute two clean post-soak functional suites
+        env:
+          CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
+          FUNCTIONAL_SUITE_COMMAND: ${{ vars.FUNCTIONAL_SUITE_COMMAND }}
+        run: bash scripts/release/post_soak_functional.sh
+
+      - name: Execute blocking security policy
+        env:
+          CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
+        run: |
+          set -euo pipefail
+          bash scripts/release/security_gate.sh
+
+      - name: Generate fail-closed pre-publish report
+        run: python3 scripts/release/evidence.py report --phase pre-publish
+
+      - name: Upload retained release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence-${{ inputs.tag }}
+          path: |
+            reports/evidence
+            reports/release-evidence.md
+            reports/*-smoke.txt
+            reports/*-chaos.txt
+            reports/release-soak*
+            reports/backup-restore-*
+            reports/*.dump
+            reports/projection-*
+            reports/post-soak-functional-*
+            reports/security-release-gate.txt
+          if-no-files-found: error
+          retention-days: 365
+
+      - name: Remove release cluster
+        if: ${{ always() }}
+        run: kind delete cluster --name "${KIND_CLUSTER_NAME:-artificialflow-release}"

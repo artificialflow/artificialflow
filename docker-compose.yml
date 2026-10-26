@@ -1,61 +1,68 @@
 name: ${ARTIFICIALFLOW_COMPOSE_PROJECT_NAME:-artificialflow}
 
+# Single stack: Postgres, Elasticsearch, Kafka, Debezium Connect, and ArtificialFlow.
+# Self-contained: `docker compose up` needs no .env. Every value below is
+# `${NAME:-default}`; override any of them from the shell or `--env-file`.
+#
+# IAM_DEPLOYMENT_MODE is true or false (anything else fails startup):
+#
+#   false (default) - no IAM provider. The console shows a local sign-in
+#     (CONSOLE_ADMIN_USERNAME / CONSOLE_ADMIN_PASSWORD, default admin/admin,
+#     passed to the app from compose/iam-false.env only in this mode).
+#     The API and SDKs need no token. Local/evaluation use only.
+#
+#   true - external IAM provider (OIDC). Console users and SDK clients sign in
+#     there; roles come from the token. Requires the issuer:
+#       IAM_DEPLOYMENT_MODE=true \
+#       AUTH_ISSUER_INTERNAL_URL=https://login.example.com \
+#       AUTH_ISSUER_PUBLIC_URL=https://login.example.com \
+#       docker compose up -d
+
+x-pg-dsn: &pg-dsn host=postgres user=${POSTGRES_USER:-artificialflow} password=${POSTGRES_PASSWORD:-password} dbname=workflow_db port=5432 sslmode=disable TimeZone=UTC
+
+x-auth-env: &auth-env
+  IAM_DEPLOYMENT_MODE: ${IAM_DEPLOYMENT_MODE:-false}   # true | false
+  # true: the OIDC issuer as reached from containers, and as browsers /
+  # token `iss` see it; the audience tokens must carry; where roles sit in the token.
+  AUTH_ISSUER_INTERNAL_URL: ${AUTH_ISSUER_INTERNAL_URL:-}
+  AUTH_ISSUER_PUBLIC_URL: ${AUTH_ISSUER_PUBLIC_URL:-}
+  AUTH_CLIENT_ID: ${AUTH_CLIENT_ID:-workflow-backend}
+  AUTH_CLAIM_ROLES_PATH: ${AUTH_CLAIM_ROLES_PATH:-roles,realm_access.roles,groups}
+  # Set true only for a plain-HTTP local provider or split internal/public issuer URLs.
+  AUTH_ALLOW_INSECURE_ISSUER: ${AUTH_ALLOW_INSECURE_ISSUER:-false}
+  # Any other AUTH_* setting (introspection, claim paths, AUTH_PRODUCTION, ...)
+  # uses its built-in default; add it here to override. See docs/deployment.md.
+
+x-kafka-env: &kafka-env
+  KAFKA_BROKERS: kafka:29092
+  KAFKA_TOPIC_EVENTS: workflow.events.v1
+
 services:
-
-  # ---------------------------------------------------------------------------
-  # DATA STORES
-  # ---------------------------------------------------------------------------
-
   postgres:
     image: postgres:15-alpine
+    command: postgres -c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-artificialflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: workflow_db
-    command:
-      - postgres
-      - -c
-      - wal_level=logical
-      - -c
-      - max_wal_senders=10
-      - -c
-      - max_replication_slots=10
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d workflow_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: "pg_isready -U $${POSTGRES_USER} -d workflow_db", interval: 5s, timeout: 5s, retries: 5}
 
   elasticsearch:
-    profiles: ["full-cqrs"]
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
-    ports:
-      - "9200:9200"
-    volumes:
-      - esdata:/usr/share/elasticsearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 60s
-
-  # ---------------------------------------------------------------------------
-  # MESSAGE BUS (EVENTING)
-  # ---------------------------------------------------------------------------
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms512m -Xmx512m}
+    ports: ["9200:9200"]
+    volumes: [esdata:/usr/share/elasticsearch/data]
+    healthcheck: {test: "curl -s http://localhost:9200 >/dev/null", interval: 5s, timeout: 5s, retries: 20, start_period: 60s}
 
   kafka:
-    profiles: ["full-cqrs"]
     image: confluentinc/cp-kafka:7.6.1
     environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
@@ -67,235 +74,130 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
-    ports:
-      - "9092:9092"
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 15
+    ports: ["9092:9092"]
+    healthcheck: {test: "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1", interval: 10s, timeout: 10s, retries: 15}
 
   connect:
-    profiles: ["full-cqrs"]
     image: debezium/connect:2.6
-    depends_on:
-      kafka:
-        condition: service_healthy
-    ports:
-      - "8083:8083"
     environment:
       BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: ${CONNECT_GROUP_ID:-artificialflow-debezium}
-      CONFIG_STORAGE_TOPIC: ${CONNECT_CONFIG_STORAGE_TOPIC:-artificialflow_connect_configs}
-      OFFSET_STORAGE_TOPIC: ${CONNECT_OFFSET_STORAGE_TOPIC:-artificialflow_connect_offsets}
-      STATUS_STORAGE_TOPIC: ${CONNECT_STATUS_STORAGE_TOPIC:-artificialflow_connect_statuses}
+      GROUP_ID: artificialflow-debezium
+      CONFIG_STORAGE_TOPIC: artificialflow_connect_configs
+      OFFSET_STORAGE_TOPIC: artificialflow_connect_offsets
+      STATUS_STORAGE_TOPIC: artificialflow_connect_statuses
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
       ENABLE_DEBEZIUM_SCRIPTING: "true"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-
-  # ---------------------------------------------------------------------------
-  # BACKEND SERVICES
-  # ---------------------------------------------------------------------------
+    ports: ["8083:8083"]
+    depends_on: {postgres: {condition: service_healthy}, kafka: {condition: service_healthy}}
+    healthcheck: {test: "curl -sf http://localhost:8083/connectors >/dev/null", interval: 10s, timeout: 5s, retries: 15}
 
   app:
     restart: unless-stopped
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    ports:
-      - "8080:8080"
+    image: ${ARTIFICIALFLOW_IMAGE_REGISTRY:-artificialflow}/workflow-command:${ARTIFICIALFLOW_IMAGE_TAG:-1.2.0}
+    build: {context: ., dockerfile: backend/Dockerfile}
+    ports: ["8080:8080"]
+    # Console sign-in. Only compose/iam-false.env exists, so nothing is loaded
+    # when IAM_DEPLOYMENT_MODE=true.
+    env_file:
+      - path: ./compose/iam-${IAM_DEPLOYMENT_MODE:-false}.env
+        required: false
     environment:
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-artificialflow} password=${POSTGRES_PASSWORD:-password} dbname=workflow_db port=5432 sslmode=disable TimeZone=UTC
-      - ES_ADDR=http://elasticsearch:9200
-      - SERVER_ADDR=0.0.0.0:8080
-      # -----------------------------------------------------------------------
-      # IAM / OIDC Authentication Configuration
-      # This backend natively supports integrating with any modern IAM solution
-      # (e.g., Azure AD, Okta, Auth0, Keycloak) without code changes.
-      # Modify these variables to manually point to your enterprise IAM.
-      # The defaults below are pre-configured for a ZITADEL instance.
-      # -----------------------------------------------------------------------
-      - AUTH_ISSUER_INTERNAL_URL=
-      - AUTH_ISSUER_PUBLIC_URL=
-      - AUTH_CLIENT_ID=
-      - AUTH_TOKEN_MODE=jwt
-      - AUTH_INTROSPECTION_URL=
-      - AUTH_INTROSPECTION_CLIENT_ID=
-      - AUTH_INTROSPECTION_CLIENT_SECRET=
-      - AUTH_INTROSPECTION_AUTH_METHOD=basic
-      - AUTH_CLAIM_SUBJECT_PATH=sub
-      - AUTH_CLAIM_ROLES_PATH=roles,realm_access.roles,groups
-      - AUTH_CLAIM_SCOPES_PATH=scope,scp
-      - AUTH_CLAIM_TENANT_PATH=tenant_id
-      - AUTH_CLAIM_EMAIL_PATH=email
-      - AUTH_CLAIM_NAME_PATH=name
-      - ALLOWED_ORIGINS=http://localhost:9100,http://localhost:5173
-      - CORS_ALLOW_CREDENTIALS=false
-      - AUTH_ENFORCE_AUDIENCE=false
-      - AUTH_ALLOW_INSECURE_ISSUER=true
-      - EVENT_BUS_TYPE=kafka
-      - KAFKA_BROKERS=kafka:29092
-      - KAFKA_TOPIC_EVENTS=workflow.events.v1
-      - RUNTIME_ENABLED=false
+      <<: [*auth-env, *kafka-env]
+      PG_DSN: *pg-dsn
+      ES_ADDR: http://elasticsearch:9200
+      RUNTIME_ENABLED: "false"
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    healthcheck: {test: "wget --spider -q http://localhost:8080/readyz", interval: 10s, timeout: 5s, retries: 5}
 
   workflow-runtime:
     restart: unless-stopped
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.runtime
+    image: ${ARTIFICIALFLOW_IMAGE_REGISTRY:-artificialflow}/workflow-runtime:${ARTIFICIALFLOW_IMAGE_TAG:-1.2.0}
+    build: {context: ., dockerfile: backend/Dockerfile.runtime}
     environment:
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-artificialflow} password=${POSTGRES_PASSWORD:-password} dbname=workflow_db port=5432 sslmode=disable TimeZone=UTC
-      - RUNTIME_ENABLED=true
-      - RUNTIME_TICK_INTERVAL=1s
-      - RUNTIME_TASK_TIMEOUT=5s
-      - METRICS_ADDR=:9091
-      - EVENT_BUS_TYPE=kafka
-      - KAFKA_BROKERS=kafka:29092
-      - KAFKA_TOPIC_EVENTS=workflow.events.v1
+      <<: *kafka-env
+      PG_DSN: *pg-dsn
+      RUNTIME_ENABLED: "true"
+      RUNTIME_TICK_INTERVAL: ${RUNTIME_TICK_INTERVAL:-1s}
+      RUNTIME_TASK_TIMEOUT: ${RUNTIME_TASK_TIMEOUT:-5s}
+      RUNTIME_SCHEDULER_MODE: ${RUNTIME_SCHEDULER_MODE:-compat}
+      RUNTIME_CLAIM_BATCH_SIZE: ${RUNTIME_CLAIM_BATCH_SIZE:-100}
+      METRICS_ADDR: :9091
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    healthcheck: {test: "wget --spider -q http://localhost:9091/readyz", interval: 10s, timeout: 5s, retries: 5}
 
   workflow-query:
-    profiles: ["full-cqrs"]
     restart: unless-stopped
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.workflow-query
-    ports:
-      - "8081:8081"
+    image: ${ARTIFICIALFLOW_IMAGE_REGISTRY:-artificialflow}/workflow-query:${ARTIFICIALFLOW_IMAGE_TAG:-1.2.0}
+    build: {context: ., dockerfile: backend/Dockerfile.workflow-query}
+    ports: ["8081:8081"]
     environment:
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-artificialflow} password=${POSTGRES_PASSWORD:-password} dbname=workflow_db port=5432 sslmode=disable TimeZone=UTC
-      - ES_ADDR=http://elasticsearch:9200
-      - SEARCH_BACKEND=${SEARCH_BACKEND:-elasticsearch}
-      - QUERY_SERVER_ADDR=0.0.0.0:8081
-      - ES_INDEX_PREFIX=${ES_INDEX_PREFIX:-artificialflow}
-      # -----------------------------------------------------------------------
-      # IAM / OIDC Authentication Configuration
-      # (Must match the configuration used in the app service above)
-      # -----------------------------------------------------------------------
-      - AUTH_ISSUER_INTERNAL_URL=
-      - AUTH_ISSUER_PUBLIC_URL=
-      - AUTH_CLIENT_ID=
-      - AUTH_TOKEN_MODE=jwt
-      - AUTH_INTROSPECTION_URL=
-      - AUTH_INTROSPECTION_CLIENT_ID=
-      - AUTH_INTROSPECTION_CLIENT_SECRET=
-      - AUTH_INTROSPECTION_AUTH_METHOD=basic
-      - AUTH_CLAIM_SUBJECT_PATH=sub
-      - AUTH_CLAIM_ROLES_PATH=roles,realm_access.roles,groups
-      - AUTH_CLAIM_SCOPES_PATH=scope,scp
-      - AUTH_CLAIM_TENANT_PATH=tenant_id
-      - AUTH_CLAIM_EMAIL_PATH=email
-      - AUTH_CLAIM_NAME_PATH=name
-      - ALLOWED_ORIGINS=http://localhost:9100,http://localhost:5173
-      - CORS_ALLOW_CREDENTIALS=false
-      - AUTH_ENFORCE_AUDIENCE=false
-      - AUTH_ALLOW_INSECURE_ISSUER=true
-    depends_on:
-      postgres:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:8081/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      <<: *auth-env
+      PG_DSN: *pg-dsn
+      ES_ADDR: http://elasticsearch:9200
+      QUERY_SERVER_ADDR: 0.0.0.0:8081
+    depends_on: {elasticsearch: {condition: service_healthy}}
+    healthcheck: {test: "wget --spider -q http://localhost:8081/readyz", interval: 10s, timeout: 5s, retries: 5}
 
   sync-worker:
-    profiles: ["full-cqrs"]
     restart: unless-stopped
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.sync-worker
-    ports:
-      - "8092:8092"
+    image: ${ARTIFICIALFLOW_IMAGE_REGISTRY:-artificialflow}/sync-worker:${ARTIFICIALFLOW_IMAGE_TAG:-1.2.0}
+    build: {context: ., dockerfile: backend/Dockerfile.sync-worker}
+    ports: ["8092:8092"]
     environment:
-      KAFKA_BROKERS: "kafka:29092"
-      KAFKA_GROUP_ID: "${KAFKA_GROUP_ID:-artificialflow-sync-worker-v8}"
-      KAFKA_TOPICS: "${KAFKA_TOPICS:-workflow.events.v1,artificialflow.public.process,artificialflow.public.process_instance,artificialflow.public.element_instance,artificialflow.public.variable,artificialflow.public.job,artificialflow.public.incident,artificialflow.public.timer,artificialflow.public.message_subscription}"
-      SYNC_PROJECTION_CONTRACT: "hybrid"
-      KAFKA_DLQ_TOPIC: "workflow.sync.dlq"
-      CONNECT_BOOTSTRAP_ENABLED: "true"
-      CONNECT_URL: "http://connect:8083"
-      CONNECTOR_NAME: "${CONNECTOR_NAME:-artificialflow-postgres-connector}"
-      CONNECTOR_TOPIC_PREFIX: "${CONNECTOR_TOPIC_PREFIX:-artificialflow}"
-      CONNECTOR_SLOT_NAME: "${CONNECTOR_SLOT_NAME:-artificialflow_slot}"
-      CONNECTOR_DATABASE_USER: "${CONNECTOR_DATABASE_USER:-${POSTGRES_USER:-artificialflow}}"
-      CONNECT_ALLOW_PARALLEL_IDENTIFIERS: "${CONNECT_ALLOW_PARALLEL_IDENTIFIERS:-false}"
-      CONNECTOR_FILE: ""
-      CONNECTOR_JSON: ""
-      CONNECT_WAIT_TIMEOUT_SEC: "180"
-      SYNC_MAX_PROCESS_RETRIES: "3"
-      SYNC_RETRY_BACKOFF: "500ms"
-      SYNC_FRESHNESS_SLO_SEC: "120"
-      SYNC_HEALTH_FAIL_ON_STALE: "false"
-      SYNC_METRICS_ADDR: ":8092"
-      ES_ADDR: "http://elasticsearch:9200"
-      ES_INDEX_PREFIX: "${ES_INDEX_PREFIX:-artificialflow}"
-      SYNC_ALLOW_MIXED_DEBEZIUM_PREFIXES: "${SYNC_ALLOW_MIXED_DEBEZIUM_PREFIXES:-false}"
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_GROUP_ID: artificialflow-sync-worker-v8
+      KAFKA_TOPICS: workflow.events.v1,artificialflow.public.process,artificialflow.public.process_instance,artificialflow.public.element_instance,artificialflow.public.variable,artificialflow.public.job,artificialflow.public.incident,artificialflow.public.timer,artificialflow.public.message_subscription
+      CONNECT_URL: http://connect:8083
+      CONNECTOR_DATABASE_HOSTNAME: postgres
+      CONNECTOR_DATABASE_USER: ${POSTGRES_USER:-artificialflow}
+      CONNECTOR_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      ES_ADDR: http://elasticsearch:9200
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
-      kafka:
-        condition: service_healthy
-      connect:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
-
-  # ---------------------------------------------------------------------------
-  # FRONTEND & GATEWAY
-  # ---------------------------------------------------------------------------
-
-  gateway:
-    image: nginx:alpine
-    ports:
-      - "9100:80"
-    volumes:
-      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf
-    depends_on:
-      frontend:
-        condition: service_started
-      app:
-        condition: service_started
+      kafka: {condition: service_healthy}
+      connect: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+    healthcheck: {test: "wget --spider -q http://localhost:8092/readyz", interval: 10s, timeout: 5s, retries: 18, start_period: 30s}
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_API_URL: http://localhost:9100/api
-        VITE_OIDC_AUTHORITY: ""
-        VITE_OIDC_CLIENT_ID: ""
+    restart: unless-stopped
+    image: ${ARTIFICIALFLOW_IMAGE_REGISTRY:-artificialflow}/frontend:${ARTIFICIALFLOW_IMAGE_TAG:-1.2.0}
+    build: {context: ., dockerfile: frontend/Dockerfile}
     environment:
-      # -----------------------------------------------------------------------
-      # Frontend IAM / OIDC Configuration
-      # Replace these URLs with your enterprise IAM solution's authorization endpoint.
-      # -----------------------------------------------------------------------
-      - VITE_API_URL=http://localhost:9100/api
-      - VITE_OIDC_AUTHORITY=
-      - VITE_OIDC_CLIENT_ID=
-      - FRONTEND_AUTH_OIDC_AUTHORITY=
-      - FRONTEND_AUTH_OIDC_CLIENT_ID=
-      - ARTIFICIALFLOW_API_URL=http://localhost:9100/api
-      - ARTIFICIALFLOW_OIDC_AUTHORITY=
-      - ARTIFICIALFLOW_OIDC_CLIENT_ID=
-    depends_on:
-      - app
+      ARTIFICIALFLOW_API_URL: http://localhost:9100/api
+      IAM_DEPLOYMENT_MODE: ${IAM_DEPLOYMENT_MODE:-false}
+      FRONTEND_AUTH_OIDC_AUTHORITY: ${FRONTEND_AUTH_OIDC_AUTHORITY:-${AUTH_ISSUER_PUBLIC_URL:-}}
+      FRONTEND_AUTH_OIDC_CLIENT_ID: ${FRONTEND_AUTH_OIDC_CLIENT_ID:-workflow-frontend}
+    depends_on: [app, workflow-query]
+    healthcheck: {test: "wget --spider -q http://127.0.0.1/readyz", interval: 10s, timeout: 5s, retries: 5}
+
+  gateway:
+    restart: unless-stopped
+    image: nginx:alpine
+    ports: ["${FRONTEND_PORT:-9100}:80"]
+    environment:
+      # The CSP allows browser calls to this provider's origin when IAM is on.
+      IAM_DEPLOYMENT_MODE: ${IAM_DEPLOYMENT_MODE:-false}
+      OIDC_AUTHORITY: ${FRONTEND_AUTH_OIDC_AUTHORITY:-${AUTH_ISSUER_PUBLIC_URL:-}}
+      NGINX_ENVSUBST_FILTER: ^OIDC_CSP_ORIGIN$$
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./gateway/oidc-csp.envsh:/docker-entrypoint.d/15-oidc-csp.envsh:ro
+      - ./docs/openapi.yaml:/usr/share/nginx/html/openapi.yaml:ro
+    depends_on: [frontend, app, workflow-query]
+    healthcheck: {test: "wget --spider -q http://127.0.0.1/readyz", interval: 10s, timeout: 5s, retries: 5}
 
 volumes:
-  pgdata:
-    name: ${ARTIFICIALFLOW_PGDATA_VOLUME:-artificialflow-postgres-data}
-  esdata:
-    name: ${ARTIFICIALFLOW_ESDATA_VOLUME:-artificialflow-elasticsearch-data}
+  pgdata: {name: "${ARTIFICIALFLOW_PGDATA_VOLUME:-artificialflow-postgres-data}"}
+  esdata: {name: "${ARTIFICIALFLOW_ESDATA_VOLUME:-artificialflow-elasticsearch-data}"}
+
+networks:
+  default: {name: "${ARTIFICIALFLOW_NETWORK:-artificialflow}"}

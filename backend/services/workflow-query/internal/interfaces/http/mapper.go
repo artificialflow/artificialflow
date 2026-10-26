@@ -50,7 +50,7 @@ func mapInstanceResponse(instance model.ProcessInstance) InstanceResponse {
 	response := InstanceResponse{
 		ID:         strconv.FormatInt(instance.Key, 10),
 		WorkflowID: strconv.FormatInt(instance.ProcessDefinitionKey, 10),
-		Status:     mapInstanceStatus(instance.State),
+		Status:     mapInstanceStatus(string(instance.State)),
 		Context:    instance.Context,
 		CreatedAt:  instance.CreatedAt,
 		UpdatedAt:  updatedAt,

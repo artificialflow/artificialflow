@@ -1,43 +1,29 @@
 import { Worker, WorkerHandler, WorkerOptions } from './Worker';
-import {
-    OAuthClientCredentialsAuthProvider,
-    ZitadelJwtProfileAuthProvider,
-} from './Auth';
+import { OAuthClientCredentialsAuthProvider } from './Auth';
 import {
     ActivateJobsRequest,
     ActivateJobsResponse,
-    CreateIdentityManagementClientTokenRequest,
-    CreateIdentityManagementRoleRequest,
-    CreateIdentityManagementUserRequest,
     EngineMetricsResponse,
     ExtendJobLockRequest,
     FailJobRequest,
     FetchLike,
     FetchResponseLike,
-    GetInboxInstanceOptions,
     GetInstanceOptions,
     HealthResponse,
     IdentityConfigResponse,
-    IdentityManagementClient,
-    IdentityManagementClientToken,
-    IdentityManagementRole,
-    IdentityManagementUser,
     IdentityResponse,
     InstanceSearchResponse,
-    InboxRequestOptions,
-    ListMyCompletedTransactionsOptions,
+    InstanceMigrationRequest,
+    InstanceMigrationResult,
     ListOptions,
-    ListUserTasksOptions,
     ListWorkflowsOptions,
     PublishEscalationRequest,
     PublishMessageRequest,
     PublishSignalRequest,
     RequestOptions,
-    RotateIdentityManagementClientTokenRequest,
     SearchInstancesOptions,
+    SearchTasksOptions,
     StartInstanceRequest,
-    UpdateIdentityManagementRoleRequest,
-    UpdateIdentityManagementUserRequest,
     UpdateVariablesRequest,
     UserTask,
     WorkerCapabilitiesResponse,
@@ -46,6 +32,10 @@ import {
     WorkflowSearchResponse,
     ArtificialFlowClientOptions,
     CompleteJobRequest,
+    DecisionDefinition,
+    Incident,
+    Job,
+    ListIncidentsOptions,
     TokenProvider,
 } from './types';
 
@@ -65,6 +55,15 @@ export class ArtificialFlowApiError extends Error {
     public readonly body: string;
     public readonly method: string;
     public readonly path: string;
+    public readonly correlationId?: string;
+    public readonly problem?: {
+        type: string;
+        title: string;
+        status: number;
+        detail?: string;
+        instance?: string;
+        correlationId?: string;
+    };
 
     constructor(method: string, path: string, response: FetchResponseLike, body: string) {
         super(`${method} ${path} returned ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
@@ -74,6 +73,16 @@ export class ArtificialFlowApiError extends Error {
         this.body = body;
         this.method = method;
         this.path = path;
+        try {
+            const parsed = JSON.parse(body) as ArtificialFlowApiError['problem'];
+            if (parsed && typeof parsed === 'object' && typeof parsed.status === 'number' && typeof parsed.title === 'string') {
+                this.problem = parsed;
+                this.correlationId = parsed.correlationId || response.headers.get('x-correlation-id') || undefined;
+                this.message = `${method} ${path} returned ${response.status} ${parsed.title}${parsed.detail ? `: ${parsed.detail}` : ''}`;
+            }
+        } catch {
+            this.correlationId = response.headers.get('x-correlation-id') || undefined;
+        }
     }
 }
 
@@ -91,16 +100,11 @@ export class ArtificialFlowClient {
         if (resolvedOptions.token !== undefined && resolvedOptions.auth !== undefined) {
             throw new Error('ArtificialFlowClient options.token and options.auth cannot be used together');
         }
-        this.baseUrl = normalizeBaseUrl(resolvedOptions.baseUrl || 'http://localhost:9100/api');
+        this.baseUrl = normalizeBaseUrl(resolvedOptions.baseUrl || 'http://localhost:9100/api/v1');
         this.queryBaseUrl = normalizeBaseUrl(resolvedOptions.queryBaseUrl || `${this.baseUrl}/query`);
         this.fetchImpl = resolvedOptions.fetch || defaultFetch();
         this.token = resolvedOptions.token;
-        if (resolvedOptions.auth?.type === 'zitadel-jwt-profile') {
-            this.authProvider = new ZitadelJwtProfileAuthProvider(
-                resolvedOptions.auth,
-                this.fetchImpl,
-            );
-        } else if (resolvedOptions.auth?.type === 'oauth-client-credentials') {
+        if (resolvedOptions.auth?.type === 'oauth-client-credentials') {
             this.authProvider = new OAuthClientCredentialsAuthProvider(
                 resolvedOptions.auth,
                 this.fetchImpl,
@@ -121,6 +125,10 @@ export class ArtificialFlowClient {
 
     public async queryHealth(options?: RequestOptions): Promise<HealthResponse> {
         return this.queryRequest<HealthResponse>('GET', '/health', undefined, options);
+    }
+
+    public async commandHealth(options?: RequestOptions): Promise<HealthResponse> {
+        return this.health(options);
     }
 
     public async deployWorkflow(bpmnXml: string, options?: RequestOptions): Promise<WorkflowDefinition> {
@@ -154,6 +162,29 @@ export class ArtificialFlowClient {
         await this.request<void>('DELETE', `/workflows/${encodeURIComponent(id)}`, undefined, options);
     }
 
+    public async listDecisions(options?: RequestOptions): Promise<DecisionDefinition[]> {
+        const response = await this.request<{ decisions?: DecisionDefinition[] }>('GET', '/decisions', undefined, options);
+        return response.decisions || [];
+    }
+
+    public async deployDecision(decisionId: string, name: string, resource: string, options?: RequestOptions): Promise<DecisionDefinition> {
+        return this.request<DecisionDefinition>('POST', '/decisions', {
+            decision_id: decisionId,
+            name,
+            resource,
+        }, options);
+    }
+
+    public async evaluateDecision(id: string, inputs: Record<string, unknown>, options?: RequestOptions): Promise<Record<string, unknown>> {
+        const response = await this.request<{ outputs?: Record<string, unknown> }>(
+            'POST',
+            `/decisions/${encodeURIComponent(id)}/evaluate`,
+            { inputs },
+            options,
+        );
+        return response.outputs || {};
+    }
+
     public async startInstance(workflowId: string, context?: Record<string, unknown>, options?: RequestOptions): Promise<WorkflowInstance>;
     public async startInstance(request: StartInstanceRequest, options?: RequestOptions): Promise<WorkflowInstance>;
     public async startInstance(
@@ -172,6 +203,14 @@ export class ArtificialFlowClient {
         return this.request<WorkflowInstance[]>('GET', '/instances', undefined, options);
     }
 
+    public async listInstances(options?: RequestOptions): Promise<WorkflowInstance[]> {
+        return this.listActiveInstances(options);
+    }
+
+    public async listCompletedInstances(limit = 100, options?: RequestOptions): Promise<WorkflowInstance[]> {
+        return this.request<WorkflowInstance[]>('GET', `/instances/history/completed${queryString({ limit }, ['limit'])}`, undefined, options);
+    }
+
     public async getInstances(options: SearchInstancesOptions & RequestOptions = {}): Promise<WorkflowInstance[]> {
         const response = await this.searchInstances(options);
         return response.instances;
@@ -188,48 +227,26 @@ export class ArtificialFlowClient {
         return this.request<WorkflowInstance>('GET', `/instances/${encodeURIComponent(id)}`, undefined, options);
     }
 
-    public async listInboxItems(options: InboxRequestOptions): Promise<WorkflowInstance[]> {
-        return this.request<WorkflowInstance[]>('GET', '/inbox', undefined, withActingUserHeaders(options));
+    public async getProjectedInstance(id: string, options?: RequestOptions): Promise<WorkflowInstance> {
+        return this.queryRequest<WorkflowInstance>('GET', `/instances/${encodeURIComponent(id)}`, undefined, options);
     }
 
-    public async listVisibleActiveInstances(options: InboxRequestOptions): Promise<WorkflowInstance[]> {
-        return this.listInboxItems(options);
-    }
-
-    public async getInboxInstance(id: string, options: GetInboxInstanceOptions): Promise<WorkflowInstance> {
-        return this.request<WorkflowInstance>('GET', `/inbox/instances/${encodeURIComponent(id)}${queryString(options, ['includeCompleted'])}`, undefined, withActingUserHeaders(options));
-    }
-
-    public async listUserTasks(instanceId: string, options: ListUserTasksOptions): Promise<UserTask[]> {
-        const response = await this.request<{ tasks?: UserTask[] }>(
-            'GET',
-            `/inbox/instances/${encodeURIComponent(instanceId)}/tasks${queryString(options, ['includeCompleted'])}`,
-            undefined,
-            withActingUserHeaders(options),
-        );
+    /**
+     * Finds user tasks for an end user that your application has already
+     * authenticated. assignee, candidateUser and candidateGroups are OR-combined.
+     */
+    public async searchTasks(search: SearchTasksOptions = {}, options?: RequestOptions): Promise<UserTask[]> {
+        const params = new URLSearchParams();
+        if (search.assignee) params.set('assignee', search.assignee);
+        if (search.candidateUser) params.set('candidateUser', search.candidateUser);
+        for (const group of search.candidateGroups || []) params.append('candidateGroup', group);
+        if (search.includeUnassigned) params.set('includeUnassigned', 'true');
+        if (search.processInstanceKey !== undefined) params.set('processInstanceKey', String(search.processInstanceKey));
+        if (search.state) params.set('state', search.state);
+        if (search.limit !== undefined) params.set('limit', String(search.limit));
+        const query = params.toString();
+        const response = await this.request<{ tasks?: UserTask[] }>('GET', `/tasks${query ? `?${query}` : ''}`, undefined, options);
         return response.tasks || [];
-    }
-
-    public async claimUserTask(instanceId: string, executionId: string, options: InboxRequestOptions): Promise<UserTask> {
-        return this.request<UserTask>(
-            'POST',
-            `/inbox/instances/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(executionId)}/claim`,
-            undefined,
-            withActingUserHeaders(options),
-        );
-    }
-
-    public async completeUserTask(instanceId: string, executionId: string, options: InboxRequestOptions): Promise<void> {
-        await this.request<void>(
-            'POST',
-            `/inbox/instances/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(executionId)}/complete`,
-            undefined,
-            withActingUserHeaders(options),
-        );
-    }
-
-    public async listMyCompletedTransactions(options: ListMyCompletedTransactionsOptions): Promise<WorkflowInstance[]> {
-        return this.request<WorkflowInstance[]>('GET', `/inbox/history${queryString(options, ['limit'])}`, undefined, withActingUserHeaders(options));
     }
 
     public async updateInstanceVariables(id: string, variables: Record<string, unknown>, options?: RequestOptions): Promise<void> {
@@ -245,8 +262,68 @@ export class ArtificialFlowClient {
         await this.request<void>('POST', `/instances/${encodeURIComponent(instanceId)}/complete`, { step_id: stepId }, options);
     }
 
+    public async completeInstanceStep(instanceId: string, stepId?: string, options?: RequestOptions): Promise<void> {
+        return this.completeTask(instanceId, stepId, options);
+    }
+
+    public async listInstanceTasks(instanceId: string, includeCompleted = false, options?: RequestOptions): Promise<UserTask[]> {
+        const response = await this.request<{ tasks?: UserTask[] }>(
+            'GET',
+            `/instances/${encodeURIComponent(instanceId)}/tasks${queryString({ includeCompleted }, ['includeCompleted'])}`,
+            undefined,
+            options,
+        );
+        return response.tasks || [];
+    }
+
+    /** Claims a task for assignee. Client tokens must name the end user; admins default to themselves. */
+    public async claimUserTask(instanceId: string, executionId: string, assignee?: string, options?: RequestOptions): Promise<UserTask> {
+        return this.request<UserTask>(
+            'POST',
+            `/instances/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(executionId)}/claim`,
+            assignee ? { assignee } : {},
+            options,
+        );
+    }
+
+    /** Completes a task; assignee must match the claim owner unless the caller is an admin. */
+    public async completeUserTask(instanceId: string, executionId: string, assignee?: string, options?: RequestOptions): Promise<void> {
+        await this.request<void>(
+            'POST',
+            `/instances/${encodeURIComponent(instanceId)}/tasks/${encodeURIComponent(executionId)}/complete`,
+            assignee ? { assignee } : {},
+            options,
+        );
+    }
+
     public async deleteInstance(id: string, options?: RequestOptions): Promise<void> {
         await this.request<void>('DELETE', `/instances/${encodeURIComponent(id)}`, undefined, options);
+    }
+
+    public async dryRunInstanceMigration(
+        id: string,
+        migration: InstanceMigrationRequest,
+        options?: RequestOptions,
+    ): Promise<InstanceMigrationResult> {
+        return this.request<InstanceMigrationResult>(
+            'POST',
+            `/instances/${encodeURIComponent(id)}/migration/dry-run`,
+            migration,
+            options,
+        );
+    }
+
+    public async migrateInstance(
+        id: string,
+        migration: InstanceMigrationRequest,
+        options?: RequestOptions,
+    ): Promise<InstanceMigrationResult> {
+        return this.request<InstanceMigrationResult>(
+            'POST',
+            `/instances/${encodeURIComponent(id)}/migration`,
+            migration,
+            options,
+        );
     }
 
     public async publishSignal(signalName: string, payload?: Record<string, unknown>, options?: RequestOptions): Promise<void>;
@@ -300,6 +377,10 @@ export class ArtificialFlowClient {
         return this.request<WorkerCapabilitiesResponse>('GET', '/jobs/capabilities', undefined, withWorkerHeaders(options));
     }
 
+    public async getJobCapabilities(options?: RequestOptions): Promise<WorkerCapabilitiesResponse> {
+        return this.getWorkerCapabilities(options);
+    }
+
     public async completeJob(key: string | number, request: CompleteJobRequest, options?: RequestOptions): Promise<void> {
         await this.request<void>('POST', `/jobs/${encodeURIComponent(String(key))}/complete`, request, withWorkerHeaders(options));
     }
@@ -312,6 +393,29 @@ export class ArtificialFlowClient {
         await this.request<void>('POST', `/jobs/${encodeURIComponent(String(key))}/extend-lock`, request, withWorkerHeaders(options));
     }
 
+    public async listInstanceJobs(instanceId: string, options?: RequestOptions): Promise<Job[]> {
+        const response = await this.request<{ jobs?: Job[] }>('GET', `/instances/${encodeURIComponent(instanceId)}/jobs`, undefined, options);
+        return response.jobs || [];
+    }
+
+    public async retryJob(key: string | number, retries = 3, options?: RequestOptions): Promise<void> {
+        await this.request<void>('POST', `/jobs/${encodeURIComponent(String(key))}/retry`, { retries }, options);
+    }
+
+    public async listIncidents(options: ListIncidentsOptions & RequestOptions = {}): Promise<Incident[]> {
+        const response = await this.request<{ incidents?: Incident[] }>(
+            'GET',
+            `/incidents${queryString(options, ['processInstanceKey', 'limit'])}`,
+            undefined,
+            options,
+        );
+        return response.incidents || [];
+    }
+
+    public async resolveIncident(key: string | number, options?: RequestOptions): Promise<Incident> {
+        return this.request<Incident>('POST', `/incidents/${encodeURIComponent(String(key))}/resolve`, undefined, options);
+    }
+
     public async getEngineMetrics(options?: RequestOptions): Promise<EngineMetricsResponse> {
         return this.request<EngineMetricsResponse>('GET', '/internal/metrics', undefined, options);
     }
@@ -320,139 +424,12 @@ export class ArtificialFlowClient {
         return this.request<IdentityResponse>('GET', '/identity/me', undefined, options);
     }
 
+    public async getQueryIdentity(options?: RequestOptions): Promise<IdentityResponse> {
+        return this.queryRequest<IdentityResponse>('GET', '/identity/me', undefined, options);
+    }
+
     public async getIdentityConfig(options?: RequestOptions): Promise<IdentityConfigResponse> {
         return this.request<IdentityConfigResponse>('GET', '/identity/config', undefined, options);
-    }
-
-    public async listIdentityUsers(options?: RequestOptions): Promise<IdentityManagementUser[]> {
-        const response = await this.request<{ users?: IdentityManagementUser[] }>('GET', '/identity/management/users', undefined, options);
-        return response.users || [];
-    }
-
-    public async getIdentityManagementUsers(options?: RequestOptions): Promise<IdentityManagementUser[]> {
-        return this.listIdentityUsers(options);
-    }
-
-    public async createIdentityUser(request: CreateIdentityManagementUserRequest, options?: RequestOptions): Promise<IdentityManagementUser> {
-        return this.request<IdentityManagementUser>('POST', '/identity/management/users', normalizeCreateUserRequest(request), options);
-    }
-
-    public async createIdentityManagementUser(request: CreateIdentityManagementUserRequest, options?: RequestOptions): Promise<IdentityManagementUser> {
-        return this.createIdentityUser(request, options);
-    }
-
-    public async createIdentityClientToken(request: CreateIdentityManagementClientTokenRequest, options?: RequestOptions): Promise<IdentityManagementClientToken> {
-        return this.request<IdentityManagementClientToken>('POST', '/identity/management/clients', normalizeCreateClientTokenRequest(request), options);
-    }
-
-    public async createIdentityManagementClientToken(request: CreateIdentityManagementClientTokenRequest, options?: RequestOptions): Promise<IdentityManagementClientToken> {
-        return this.createIdentityClientToken(request, options);
-    }
-
-    public async createArtificialFlowClientToken(request: CreateIdentityManagementClientTokenRequest, options?: RequestOptions): Promise<IdentityManagementClientToken> {
-        return this.createIdentityClientToken(request, options);
-    }
-
-    public async listIdentityClients(options?: RequestOptions): Promise<IdentityManagementClient[]> {
-        const response = await this.request<{ clients?: IdentityManagementClient[] }>('GET', '/identity/management/clients', undefined, options);
-        return response.clients || [];
-    }
-
-    public async getIdentityManagementClients(options?: RequestOptions): Promise<IdentityManagementClient[]> {
-        return this.listIdentityClients(options);
-    }
-
-    public async listArtificialFlowClients(options?: RequestOptions): Promise<IdentityManagementClient[]> {
-        return this.listIdentityClients(options);
-    }
-
-    public async rotateIdentityClientToken(id: string, request: RotateIdentityManagementClientTokenRequest = {}, options?: RequestOptions): Promise<IdentityManagementClientToken> {
-        return this.request<IdentityManagementClientToken>('POST', `/identity/management/clients/${encodeURIComponent(id)}/tokens`, normalizeRotateClientTokenRequest(request), options);
-    }
-
-    public async rotateIdentityManagementClientToken(id: string, request: RotateIdentityManagementClientTokenRequest = {}, options?: RequestOptions): Promise<IdentityManagementClientToken> {
-        return this.rotateIdentityClientToken(id, request, options);
-    }
-
-    public async revokeIdentityClientToken(id: string, tokenId: string, options?: RequestOptions): Promise<void> {
-        await this.request<void>('DELETE', `/identity/management/clients/${encodeURIComponent(id)}/tokens/${encodeURIComponent(tokenId)}`, undefined, options);
-    }
-
-    public async revokeIdentityManagementClientToken(id: string, tokenId: string, options?: RequestOptions): Promise<void> {
-        await this.revokeIdentityClientToken(id, tokenId, options);
-    }
-
-    public async deleteIdentityClient(id: string, options?: RequestOptions): Promise<void> {
-        await this.request<void>('DELETE', `/identity/management/clients/${encodeURIComponent(id)}`, undefined, options);
-    }
-
-    public async deleteIdentityManagementClient(id: string, options?: RequestOptions): Promise<void> {
-        await this.deleteIdentityClient(id, options);
-    }
-
-    public async updateIdentityUser(id: string, request: UpdateIdentityManagementUserRequest, options?: RequestOptions): Promise<IdentityManagementUser> {
-        return this.request<IdentityManagementUser>('PUT', `/identity/management/users/${encodeURIComponent(id)}`, request, options);
-    }
-
-    public async updateIdentityManagementUser(id: string, request: UpdateIdentityManagementUserRequest, options?: RequestOptions): Promise<IdentityManagementUser> {
-        return this.updateIdentityUser(id, request, options);
-    }
-
-    public async terminateIdentityUser(id: string, options?: RequestOptions): Promise<void> {
-        await this.request<void>('POST', `/identity/management/users/${encodeURIComponent(id)}/terminate`, undefined, options);
-    }
-
-    public async terminateIdentityManagementUser(id: string, options?: RequestOptions): Promise<void> {
-        await this.terminateIdentityUser(id, options);
-    }
-
-    public async reactivateIdentityUser(id: string, options?: RequestOptions): Promise<void> {
-        await this.request<void>('POST', `/identity/management/users/${encodeURIComponent(id)}/reactivate`, undefined, options);
-    }
-
-    public async reactivateIdentityManagementUser(id: string, options?: RequestOptions): Promise<void> {
-        await this.reactivateIdentityUser(id, options);
-    }
-
-    public async deleteIdentityUser(id: string, options?: RequestOptions): Promise<void> {
-        await this.request<void>('DELETE', `/identity/management/users/${encodeURIComponent(id)}`, undefined, options);
-    }
-
-    public async deleteIdentityManagementUser(id: string, options?: RequestOptions): Promise<void> {
-        await this.deleteIdentityUser(id, options);
-    }
-
-    public async listIdentityRoles(options?: RequestOptions): Promise<IdentityManagementRole[]> {
-        const response = await this.request<{ roles?: IdentityManagementRole[] }>('GET', '/identity/management/roles', undefined, options);
-        return response.roles || [];
-    }
-
-    public async getIdentityManagementRoles(options?: RequestOptions): Promise<IdentityManagementRole[]> {
-        return this.listIdentityRoles(options);
-    }
-
-    public async createIdentityRole(request: CreateIdentityManagementRoleRequest, options?: RequestOptions): Promise<IdentityManagementRole> {
-        return this.request<IdentityManagementRole>('POST', '/identity/management/roles', { ...request, group: request.group || 'ArtificialFlow' }, options);
-    }
-
-    public async createIdentityManagementRole(request: CreateIdentityManagementRoleRequest, options?: RequestOptions): Promise<IdentityManagementRole> {
-        return this.createIdentityRole(request, options);
-    }
-
-    public async updateIdentityRole(key: string, request: UpdateIdentityManagementRoleRequest, options?: RequestOptions): Promise<IdentityManagementRole> {
-        return this.request<IdentityManagementRole>('PUT', `/identity/management/roles/${encodeURIComponent(key)}`, request, options);
-    }
-
-    public async updateIdentityManagementRole(key: string, request: UpdateIdentityManagementRoleRequest, options?: RequestOptions): Promise<IdentityManagementRole> {
-        return this.updateIdentityRole(key, request, options);
-    }
-
-    public async deleteIdentityRole(key: string, options?: RequestOptions): Promise<void> {
-        await this.request<void>('DELETE', `/identity/management/roles/${encodeURIComponent(key)}`, undefined, options);
-    }
-
-    public async deleteIdentityManagementRole(key: string, options?: RequestOptions): Promise<void> {
-        await this.deleteIdentityRole(key, options);
     }
 
     public createWorker(type: string, handler: WorkerHandler, options: WorkerOptions = {}): Worker {
@@ -567,65 +544,6 @@ function withWorkerHeaders(options: RequestOptions = {}): RequestOptions {
             [HeaderWorkerProtocolVersion]: WorkerProtocolVersion,
             ...options.headers,
         },
-    };
-}
-
-function withActingUserHeaders(options: InboxRequestOptions): RequestOptions {
-    const actingUser = options.actingUser;
-    if (!actingUser || (!actingUser.subject && !actingUser.username && !actingUser.email)) {
-        throw new Error('actingUser.subject, actingUser.username, or actingUser.email is required for inbox requests');
-    }
-
-    const headers: Record<string, string> = { ...options.headers };
-    if (actingUser.subject) {
-        headers['X-ArtificialFlow-Acting-Subject'] = actingUser.subject;
-    }
-    if (actingUser.username) {
-        headers['X-ArtificialFlow-Acting-Username'] = actingUser.username;
-    }
-    if (actingUser.email) {
-        headers['X-ArtificialFlow-Acting-Email'] = actingUser.email;
-    }
-    if (actingUser.name) {
-        headers['X-ArtificialFlow-Acting-Name'] = actingUser.name;
-    }
-    if (actingUser.roles && actingUser.roles.length > 0) {
-        headers['X-ArtificialFlow-Acting-Roles'] = actingUser.roles.join(',');
-    }
-
-    return {
-        correlationId: options.correlationId,
-        idempotencyKey: options.idempotencyKey,
-        signal: options.signal,
-        headers,
-    };
-}
-
-function normalizeCreateUserRequest(request: CreateIdentityManagementUserRequest): CreateIdentityManagementUserRequest {
-    return {
-        ...request,
-        username: request.username || '',
-        password_change_required: request.password_change_required ?? false,
-        roles: request.roles || [],
-    };
-}
-
-function normalizeCreateClientTokenRequest(request: CreateIdentityManagementClientTokenRequest): CreateIdentityManagementClientTokenRequest {
-    return {
-        ...request,
-        username: request.username || '',
-        description: request.description || '',
-        environment: request.environment || '',
-        owner_email: request.owner_email || '',
-        purpose: request.purpose || '',
-        token_expires_at: request.token_expires_at || '',
-    };
-}
-
-function normalizeRotateClientTokenRequest(request: RotateIdentityManagementClientTokenRequest): RotateIdentityManagementClientTokenRequest {
-    return {
-        ...request,
-        token_expires_at: request.token_expires_at || '',
     };
 }
 

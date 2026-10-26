@@ -1,0 +1,39 @@
+{
+  "max_file_lines": 1000,
+  "max_test_file_lines": 3000,
+  "max_function_lines": 150,
+  "max_duplicate_blocks": 250,
+  "duplicate_block_lines": 12,
+  "file_allowlist": {
+    "backend/services/workflow-command/internal/domain/bpmn/parser.go": 1661,
+    "backend/services/workflow-command/internal/interfaces/http/handler.go": 1630,
+    "backend/services/workflow-command/internal/application/events.go": 1319,
+    "backend/services/workflow-command/internal/application/engine.go": 1104,
+    "frontend/src/lib/bpmn-parser.ts": 1074,
+    "frontend/src/lib/api.ts": 1018
+  },
+  "function_allowlist": {
+    "backend/services/workflow-command/cmd/runtime/main.go:main": 254,
+    "backend/services/workflow-command/cmd/server/main.go:main": 436,
+    "backend/services/workflow-command/internal/application/events.go:processTimer": 178,
+    "backend/services/workflow-command/internal/application/events.go:processMessageSubscription": 181,
+    "backend/services/workflow-command/internal/application/navigation.go:proceedToken": 626,
+    "backend/services/workflow-command/internal/infrastructure/persistence/instance_migration.go:MigrateProcessInstance": 182,
+    "backend/services/workflow-command/internal/domain/bpmn/parser.go:parseFlowElements": 562,
+    "backend/services/sync-worker/cmd/main.go:main": 218,
+    "backend/services/sync-worker/internal/application/service.go:ProcessEvent": 243,
+    "backend/services/workflow-query/cmd/server/main.go:main": 203,
+    "frontend/src/pages/Modeler.tsx:ModelerContent": 663
+  },
+  "generated_path_markers": [
+    "/api/v1/go/",
+    "/src/proto/",
+    ".pb.go",
+    "/dist/",
+    "/node_modules/"
+  ],
+  "duplicate_exclusions": [
+    "backend/api/v1/go",
+    "frontend/src/components/ui"
+  ]
+}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	queryrepository "github.com/artificialflow/artificialflow/backend/services/workflow-query/internal/domain/repository"
 )
@@ -51,6 +52,24 @@ func TestNewESRepositoryDefaultsToCanonicalPrefix(t *testing.T) {
 	}
 }
 
+func TestTenantFilterRequiresExactTenantAndBoundsLegacyDocuments(t *testing.T) {
+	tenantCtx := auth.WithPrincipal(context.Background(), auth.Principal{Subject: "reader", TenantID: "tenant-a"})
+	exact := tenantFilter(tenantCtx)
+	if !reflect.DeepEqual(exact, map[string]any{"term": map[string]any{"tenant_id": "tenant-a"}}) {
+		t.Fatalf("exact tenant filter = %#v", exact)
+	}
+
+	compat := tenantFilter(context.Background())
+	boolFilter, ok := compat["bool"].(map[string]any)
+	if !ok || boolFilter["minimum_should_match"] != 1 {
+		t.Fatalf("default compatibility filter = %#v", compat)
+	}
+	clauses, ok := boolFilter["should"].([]any)
+	if !ok || len(clauses) != 2 {
+		t.Fatalf("default compatibility clauses = %#v", boolFilter["should"])
+	}
+}
+
 func TestESRepositorySearchInstancesCanonicalOnly(t *testing.T) {
 	backend := &fakeSearchBackend{
 		responses: map[string]json.RawMessage{
@@ -68,6 +87,13 @@ func TestESRepositorySearchInstancesCanonicalOnly(t *testing.T) {
 	}
 	if result.Total != 2 || keysOfInstances(result.Instances) != "2,1" {
 		t.Fatalf("unexpected canonical result: %#v", result)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(backend.calls[0].body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["from"] != float64(0) || body["size"] != float64(10) {
+		t.Fatalf("canonical query must request only the API page, got from=%v size=%v", body["from"], body["size"])
 	}
 	assertSearchOrder(t, backend.calls, "artificialflow-process_instance")
 }

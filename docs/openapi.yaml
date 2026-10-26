@@ -1,11 +1,24 @@
 openapi: 3.0.3
 info:
   title: ArtificialFlow HTTP API
-  version: 1.1.0
+  version: 1.2.0
   description: |
-    Supported HTTP contract for ArtificialFlow command, query, worker, inbox,
-    and bundled-IAM integrations. The gateway `/api` URL is the public base.
+    Supported versioned HTTP contract for ArtificialFlow command, query, worker,
+    and user-task integrations. The gateway `/api/v1` URL is the
+    recommended public base. Unversioned `/api` compatibility routes preserve
+    their existing 1.x response and plain-text error contracts.
     Query operations under `/query` are eventually consistent.
+    Authorization uses four roles from the access token:
+    `artificialflowadmin` (everything), `artificialflowbusiness` (workflow and
+    decision modeling), `artificialflowclient` (SDK/API runtime operations and
+    user tasks) and `artificialflowanalytics` (reserved, no API access yet).
+    Client applications authenticate their own end users and pass them as
+    task filters or as `assignee`; ArtificialFlow does not validate end-user
+    tokens.
+    Authentication follows the deployment's boolean `IAM_DEPLOYMENT_MODE`:
+    with `true` every operation except health and `/identity/login` needs a
+    Bearer token from the external OIDC provider; with `false` (no IAM
+    provider) no token is needed and every call runs as `artificialflowadmin`.
   license:
     name: MIT
     url: https://opensource.org/license/mit
@@ -13,10 +26,10 @@ info:
     name: ArtificialFlow
     url: https://github.com/artificialflow/artificialflow
 servers:
-  - url: http://localhost:9100/api
-    description: Local Compose gateway
-  - url: https://app.example.com/api
-    description: Production gateway example
+  - url: http://localhost:9100/api/v1
+    description: Local versioned gateway (recommended)
+  - url: https://app.example.com/api/v1
+    description: Production versioned gateway example
 tags:
   - name: Identity
     description: Principal inspection and deployment IAM metadata
@@ -30,14 +43,12 @@ tags:
     description: BPMN message, signal, and escalation publication
   - name: Jobs
     description: External worker activation, locking, completion, and failure
-  - name: Inbox
-    description: Human-task BFF and acting-user operations
+  - name: Tasks
+    description: User-task search, claim and completion on behalf of a client application's end users
   - name: Query
     description: Eventually consistent projected search operations
   - name: Operations
     description: Health, incidents, retries, and engine counters
-  - name: IAM administration
-    description: Bundled-ZITADEL administration for trusted admin automation
 security:
   - bearerAuth: []
 paths:
@@ -81,8 +92,53 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+                properties:
+                  deployment_mode:
+                    type: boolean
+                    description: >-
+                      IAM_DEPLOYMENT_MODE. true: an external OIDC provider
+                      authenticates console users and SDK clients. false: no
+                      IAM provider; local console sign-in and no API token.
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /identity/login:
+    post:
+      tags: [Identity]
+      summary: Console sign-in when no IAM provider is used
+      description: >-
+        Checks the console admin credentials (CONSOLE_ADMIN_USERNAME /
+        CONSOLE_ADMIN_PASSWORD, default admin/admin) when
+        IAM_DEPLOYMENT_MODE=false. No token is issued: in that mode the API
+        is unauthenticated. With IAM_DEPLOYMENT_MODE=true the endpoint is
+        unavailable: the token check rejects the call (401), or 404 if a valid
+        token is sent.
+      operationId: consoleLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string}
+      responses:
+        "200":
+          description: Credentials accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Malformed request body
+        "401":
+          description: Invalid username or password, or IAM is external and no token was sent
+        "404":
+          description: IAM is external; sign in through the OIDC provider
   /workflows:
     get:
       tags: [Workflows]
@@ -326,6 +382,54 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowInstance"
+  /instances/{id}/migration/dry-run:
+    post:
+      tags: [Instances]
+      summary: Validate a bounded process-instance migration
+      operationId: dryRunInstanceMigration
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceMigrationRequest"
+      responses:
+        "200":
+          description: Migration is supported and mapping is complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceMigrationResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Migration rejected with a stable reason code
+  /instances/{id}/migration:
+    post:
+      tags: [Instances]
+      summary: Atomically apply a validated bounded process-instance migration
+      operationId: migrateInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceMigrationRequest"
+      responses:
+        "200":
+          description: Migration applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceMigrationResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Migration rejected with a stable reason code
   /instances/{id}/complete:
     post:
       tags: [Instances]
@@ -350,7 +454,7 @@ paths:
           $ref: "#/components/responses/BadRequest"
   /instances/{id}/tasks:
     get:
-      tags: [Instances]
+      tags: [Tasks]
       summary: List user tasks for an instance
       operationId: listInstanceTasks
       parameters:
@@ -365,24 +469,12 @@ paths:
                 $ref: "#/components/schemas/UserTaskList"
   /instances/{id}/tasks/{executionId}/claim:
     post:
-      tags: [Instances]
-      summary: Administratively claim a user task
-      operationId: adminClaimTask
-      parameters:
-        - $ref: "#/components/parameters/InstanceId"
-        - $ref: "#/components/parameters/ExecutionId"
-      responses:
-        "200":
-          description: Claimed task
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserTask"
-  /instances/{id}/tasks/{executionId}/complete:
-    post:
-      tags: [Instances]
-      summary: Administratively complete a user task
-      operationId: adminCompleteTask
+      tags: [Tasks]
+      summary: Claim a user task for an end user
+      description: |
+        Clients must name the end user in `assignee`. Admins default to their
+        own identity and may reassign a task claimed by someone else.
+      operationId: claimUserTask
       parameters:
         - $ref: "#/components/parameters/InstanceId"
         - $ref: "#/components/parameters/ExecutionId"
@@ -390,18 +482,105 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                variables:
-                  type: object
-                  additionalProperties: true
+              $ref: "#/components/schemas/UserTaskAction"
       responses:
         "200":
-          description: Completed task
+          description: Claimed task
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserTask"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /instances/{id}/tasks/{executionId}/complete:
+    post:
+      tags: [Tasks]
+      summary: Complete a user task for the end user who claimed it
+      description: |
+        `assignee` must match the claim owner. Admins may complete any task.
+      operationId: completeUserTask
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/ExecutionId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserTaskAction"
+      responses:
+        "200":
+          description: Task completed
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /tasks:
+    get:
+      tags: [Tasks]
+      summary: Search user tasks
+      description: |
+        Returns user tasks for a client application's end user. `assignee`,
+        `candidateUser` and `candidateGroup` are OR-combined; with none of
+        them every task in the selected state is returned.
+      operationId: searchTasks
+      parameters:
+        - name: assignee
+          in: query
+          description: Tasks assigned to or claimed by this user
+          schema:
+            type: string
+        - name: candidateUser
+          in: query
+          description: Tasks this user may act on (assignee, claim owner or candidate user)
+          schema:
+            type: string
+        - name: candidateGroup
+          in: query
+          description: Tasks offered to any of these groups. Repeat or comma-separate.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: includeUnassigned
+          in: query
+          description: Also return open tasks without assignee, candidates or claim
+          schema:
+            type: boolean
+            default: false
+        - name: processInstanceKey
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, completed, all]
+            default: active
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Matching user tasks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserTaskList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
   /instances/{id}/jobs:
     get:
       tags: [Jobs]
@@ -597,13 +776,46 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Incident"
+                type: object
+                required: [incidents]
+                properties:
+                  incidents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Incident"
+  /incidents/{key}/resolve:
+    post:
+      tags: [Operations]
+      summary: Resolve an incident
+      operationId: resolveIncident
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9]+$'
+      responses:
+        "200":
+          description: Resolved incident
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /internal/metrics:
     get:
       tags: [Operations]
       summary: Read engine operational counters
+      description: >-
+        Admin only. Private service-to-service endpoint: the public gateway
+        answers 404, so call the command service directly from inside the
+        cluster or Compose network.
       operationId: getEngineMetrics
       responses:
         "200":
@@ -613,129 +825,6 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
-  /inbox:
-    get:
-      tags: [Inbox]
-      summary: List active instances visible to the acting user
-      operationId: listInbox
-      parameters:
-        - $ref: "#/components/parameters/ActingSubject"
-        - $ref: "#/components/parameters/ActingUsername"
-        - $ref: "#/components/parameters/ActingEmail"
-        - $ref: "#/components/parameters/ActingName"
-        - $ref: "#/components/parameters/ActingRoles"
-      responses:
-        "200":
-          description: Visible instances
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/WorkflowInstance"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-  /inbox/history:
-    get:
-      tags: [Inbox]
-      summary: List completed history visible to the acting user
-      operationId: listInboxHistory
-      parameters:
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/ActingSubject"
-        - $ref: "#/components/parameters/ActingUsername"
-        - $ref: "#/components/parameters/ActingEmail"
-        - $ref: "#/components/parameters/ActingRoles"
-      responses:
-        "200":
-          description: Completed instances
-  /inbox/instances/{id}:
-    get:
-      tags: [Inbox]
-      summary: Get an inbox instance and task metadata
-      operationId: getInboxInstance
-      parameters:
-        - $ref: "#/components/parameters/InstanceId"
-        - $ref: "#/components/parameters/IncludeCompleted"
-        - $ref: "#/components/parameters/ActingSubject"
-        - $ref: "#/components/parameters/ActingUsername"
-        - $ref: "#/components/parameters/ActingEmail"
-        - $ref: "#/components/parameters/ActingRoles"
-      responses:
-        "200":
-          description: Inbox instance
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkflowInstance"
-  /inbox/instances/{id}/tasks:
-    get:
-      tags: [Inbox]
-      summary: List inbox tasks for an instance
-      operationId: listInboxTasks
-      parameters:
-        - $ref: "#/components/parameters/InstanceId"
-        - $ref: "#/components/parameters/IncludeCompleted"
-        - $ref: "#/components/parameters/ActingSubject"
-        - $ref: "#/components/parameters/ActingUsername"
-        - $ref: "#/components/parameters/ActingEmail"
-        - $ref: "#/components/parameters/ActingRoles"
-      responses:
-        "200":
-          description: Tasks
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserTaskList"
-  /inbox/instances/{id}/tasks/{executionId}/claim:
-    post:
-      tags: [Inbox]
-      summary: Claim a task as the acting user
-      operationId: claimInboxTask
-      parameters:
-        - $ref: "#/components/parameters/InstanceId"
-        - $ref: "#/components/parameters/ExecutionId"
-        - $ref: "#/components/parameters/ActingSubject"
-        - $ref: "#/components/parameters/ActingUsername"
-        - $ref: "#/components/parameters/ActingEmail"
-        - $ref: "#/components/parameters/ActingRoles"
-      responses:
-        "200":
-          description: Claimed task
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserTask"
-        "409":
-          $ref: "#/components/responses/Conflict"
-  /inbox/instances/{id}/tasks/{executionId}/complete:
-    post:
-      tags: [Inbox]
-      summary: Complete a claimed task as the acting user
-      operationId: completeInboxTask
-      parameters:
-        - $ref: "#/components/parameters/InstanceId"
-        - $ref: "#/components/parameters/ExecutionId"
-        - $ref: "#/components/parameters/ActingSubject"
-        - $ref: "#/components/parameters/ActingUsername"
-        - $ref: "#/components/parameters/ActingEmail"
-        - $ref: "#/components/parameters/ActingRoles"
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                variables:
-                  type: object
-                  additionalProperties: true
-      responses:
-        "200":
-          description: Completed task
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserTask"
   /query/health:
     get:
       tags: [Query]
@@ -817,183 +906,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProjectedWorkflowPage"
-  /identity/management/clients:
-    get:
-      tags: [IAM administration]
-      summary: List bundled-IAM machine clients
-      operationId: listIamClients
-      responses:
-        "200":
-          description: Machine clients
-    post:
-      tags: [IAM administration]
-      summary: Create a bundled-IAM machine client
-      operationId: createIamClient
-      responses:
-        "200":
-          description: Client and one-time credential/profile
-  /identity/management/clients/{id}:
-    delete:
-      tags: [IAM administration]
-      summary: Delete a bundled-IAM machine client
-      operationId: deleteIamClient
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "204":
-          description: Deleted
-  /identity/management/clients/{id}/tokens:
-    post:
-      tags: [IAM administration]
-      summary: Rotate or create a client token
-      operationId: rotateIamClientToken
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "200":
-          description: One-time token response
-  /identity/management/clients/{id}/tokens/{tokenId}:
-    delete:
-      tags: [IAM administration]
-      summary: Revoke a client token
-      operationId: revokeIamClientToken
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-        - name: tokenId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Revoked
-  /identity/management/clients/{id}/keys:
-    post:
-      tags: [IAM administration]
-      summary: Add a JWT Profile public key
-      operationId: addIamClientKey
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "200":
-          description: Added key
-  /identity/management/clients/{id}/keys/{keyId}:
-    delete:
-      tags: [IAM administration]
-      summary: Revoke a JWT Profile public key
-      operationId: revokeIamClientKey
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-        - name: keyId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Revoked
-  /identity/management/users:
-    get:
-      tags: [IAM administration]
-      summary: List bundled-IAM users
-      operationId: listIamUsers
-      responses:
-        "200":
-          description: Users
-    post:
-      tags: [IAM administration]
-      summary: Create a bundled-IAM user
-      operationId: createIamUser
-      responses:
-        "200":
-          description: Created user
-  /identity/management/users/{id}:
-    put:
-      tags: [IAM administration]
-      summary: Update a bundled-IAM user
-      operationId: updateIamUser
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "200":
-          description: Updated user
-    delete:
-      tags: [IAM administration]
-      summary: Delete a bundled-IAM user
-      operationId: deleteIamUser
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "204":
-          description: Deleted
-  /identity/management/users/{id}/terminate:
-    post:
-      tags: [IAM administration]
-      summary: Terminate a bundled-IAM user
-      operationId: terminateIamUser
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "200":
-          description: Terminated
-  /identity/management/users/{id}/reactivate:
-    post:
-      tags: [IAM administration]
-      summary: Reactivate a bundled-IAM user
-      operationId: reactivateIamUser
-      parameters:
-        - $ref: "#/components/parameters/ResourceId"
-      responses:
-        "200":
-          description: Reactivated
-  /identity/management/roles:
-    get:
-      tags: [IAM administration]
-      summary: List bundled-IAM roles
-      operationId: listIamRoles
-      responses:
-        "200":
-          description: Roles
-    post:
-      tags: [IAM administration]
-      summary: Create a custom bundled-IAM role
-      operationId: createIamRole
-      responses:
-        "200":
-          description: Created role
-  /identity/management/roles/{roleKey}:
-    put:
-      tags: [IAM administration]
-      summary: Update a bundled-IAM role
-      operationId: updateIamRole
-      parameters:
-        - name: roleKey
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Updated role
-    delete:
-      tags: [IAM administration]
-      summary: Delete a custom bundled-IAM role
-      operationId: deleteIamRole
-      parameters:
-        - name: roleKey
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Deleted
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: >-
+        Access token from the external OIDC provider (IAM_DEPLOYMENT_MODE=true).
+        Not required and ignored when IAM_DEPLOYMENT_MODE=false.
   parameters:
     WorkflowId:
       name: id
@@ -1067,68 +988,59 @@ components:
       schema:
         type: string
         maxLength: 128
-    ActingSubject:
-      name: X-ArtificialFlow-Acting-Subject
-      in: header
-      schema:
-        type: string
-    ActingUsername:
-      name: X-ArtificialFlow-Acting-Username
-      in: header
-      schema:
-        type: string
-    ActingEmail:
-      name: X-ArtificialFlow-Acting-Email
-      in: header
-      schema:
-        type: string
-        format: email
-    ActingName:
-      name: X-ArtificialFlow-Acting-Name
-      in: header
-      schema:
-        type: string
-    ActingRoles:
-      name: X-ArtificialFlow-Acting-Roles
-      in: header
-      schema:
-        type: string
-      description: Comma-separated candidate-group roles
   responses:
     BadRequest:
       description: Invalid request
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/ErrorText"
+            $ref: "#/components/schemas/Problem"
     Unauthorized:
       description: Missing, invalid, or expired access token
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/ErrorText"
+            $ref: "#/components/schemas/Problem"
     Forbidden:
-      description: Principal does not have the required role or acting-user scope
+      description: Principal does not have the required role
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/ErrorText"
+            $ref: "#/components/schemas/Problem"
     NotFound:
       description: Resource not found
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/ErrorText"
+            $ref: "#/components/schemas/Problem"
     Conflict:
       description: Resource state or ownership conflict
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/ErrorText"
+            $ref: "#/components/schemas/Problem"
   schemas:
-    ErrorText:
-      type: string
-      example: Bad Request
+    Problem:
+      type: object
+      required: [type, title, status, correlationId]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          example: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        correlationId:
+          type: string
     Health:
       type: object
       required: [status]
@@ -1223,6 +1135,41 @@ components:
         context:
           type: object
           additionalProperties: true
+    InstanceMigrationRequest:
+      type: object
+      required: [sourceDefinitionKey, targetDefinitionKey, elementMapping]
+      properties:
+        sourceDefinitionKey:
+          type: string
+        targetDefinitionKey:
+          type: string
+        elementMapping:
+          type: object
+          additionalProperties:
+            type: string
+        operationId:
+          type: string
+    InstanceMigrationResult:
+      type: object
+      required: [operationId, instanceKey, dryRun, status]
+      properties:
+        operationId:
+          type: string
+        instanceKey:
+          type: string
+        dryRun:
+          type: boolean
+        status:
+          type: string
+          enum: [VALIDATED, APPLIED, REJECTED]
+        reasonCode:
+          type: string
+        message:
+          type: string
+        sourceVersion:
+          type: integer
+        targetVersion:
+          type: integer
     Decision:
       type: object
       properties:
@@ -1373,6 +1320,10 @@ components:
       properties:
         key:
           type: string
+        processInstanceKey:
+          type: string
+        processDefinitionKey:
+          type: string
         elementId:
           type: string
         executionId:
@@ -1393,8 +1344,10 @@ components:
           type: string
         canClaim:
           type: boolean
+          description: Task is open and unclaimed
         canComplete:
           type: boolean
+          description: Task is open and claimed
         dueDate:
           type: string
           format: date-time
@@ -1405,6 +1358,13 @@ components:
         updatedAt:
           type: string
           format: date-time
+    UserTaskAction:
+      type: object
+      additionalProperties: false
+      properties:
+        assignee:
+          type: string
+          description: End user acting on the task. Required for client tokens.
     UserTaskList:
       type: object
       required: [tasks]

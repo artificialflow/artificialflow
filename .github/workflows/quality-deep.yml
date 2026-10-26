@@ -1,0 +1,52 @@
+name: Deep Quality Gates
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deep-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Extended Boundary Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Run extended fuzz targets
+        env:
+          FUZZ_TIME: 45s
+        run: bash scripts/quality/fuzz.sh
+
+  mutation:
+    name: Critical Mutation Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Run pinned mutation target
+        env:
+          MUTATION_REQUIRED: "true"
+        run: bash scripts/quality/mutation.sh
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: reports/mutation-httpproblem.json
+          if-no-files-found: error
+          retention-days: 30

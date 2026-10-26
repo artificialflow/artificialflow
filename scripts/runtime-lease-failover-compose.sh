@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Compose-equivalent of the HA runtime lease failover drill.
-# Requires the ZITADEL (or external-iam) stack with a runtime service.
+# Requires the single Compose stack with a runtime service.
 set -euo pipefail
 
-COMPOSE_FILES=( -f docker-compose.zitadel.yml )
-if [[ "${USE_RELEASE:-0}" == "1" ]]; then
-  COMPOSE_FILES+=( -f docker-compose.release.yml )
-fi
+COMPOSE_FILES=( --env-file /dev/null -f docker-compose.yml )
 RUNTIME_SERVICE="${RUNTIME_SERVICE:-workflow-runtime}"
 LEASE_TTL_SEC="${RUNTIME_LEASE_TTL_SEC:-15}"
 TICK_SEC="${RUNTIME_TICK_INTERVAL_SEC:-5}"
@@ -21,7 +18,7 @@ echo "compose files: ${COMPOSE_FILES[*]}"
 echo "service: ${RUNTIME_SERVICE}"
 
 if ! dc ps --status running --services 2>/dev/null | grep -qx "${RUNTIME_SERVICE}"; then
-  echo "ERROR: ${RUNTIME_SERVICE} is not running. Start the stack first (e.g. make up-zitadel)." >&2
+  echo "ERROR: ${RUNTIME_SERVICE} is not running. Start the stack first (e.g. make up)." >&2
   exit 1
 fi
 

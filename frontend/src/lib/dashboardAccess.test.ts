@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityConfigResponse, IdentityResponse } from "./api";
-import {
-  canAccessIdentityConsole,
-  identityConsoleDeniedMessage,
-  isDashboardPathAllowed,
-  isIdentityConsolePath,
-} from "./dashboardAccess";
+import { isDashboardPathAllowed, isIdentityPath } from "./dashboardAccess";
 
 function identity(roles: string[]): IdentityResponse {
   return {
@@ -14,15 +9,14 @@ function identity(roles: string[]): IdentityResponse {
   };
 }
 
-function config(mode: string): IdentityConfigResponse {
+function config(mode: boolean): IdentityConfigResponse {
   return {
     deployment_mode: mode,
-    configuration_source: "test",
     provider_name: "test",
     auth_enabled: true,
     frontend_auth_enabled: true,
-    frontend_oidc_authority: "http://localhost:9180",
-    frontend_oidc_client_id: "console",
+    frontend_oidc_authority: "https://login.example.com",
+    frontend_oidc_client_id: "workflow-frontend",
     token_validation_mode: "jwt",
     internal_issuer_url: "",
     external_issuer_url: "",
@@ -34,7 +28,6 @@ function config(mode: string): IdentityConfigResponse {
     allow_insecure_issuer: false,
     claim_subject_path: "",
     claim_roles_path: "",
-    claim_scopes_path: "",
     claim_tenant_path: "",
     claim_email_path: "",
     claim_name_path: "",
@@ -42,46 +35,51 @@ function config(mode: string): IdentityConfigResponse {
   };
 }
 
+const allowed = (path: string, roles: string[], options: { decisions?: boolean; incidents?: boolean } = {}) =>
+  isDashboardPathAllowed({
+    path,
+    identity: identity(roles),
+    config: config(true),
+    showDecisionsUi: options.decisions ?? true,
+    showIncidentsUi: options.incidents ?? true,
+  });
+
 describe("dashboardAccess", () => {
-  it("recognizes identity console paths", () => {
-    expect(isIdentityConsolePath("/identity")).toBe(true);
-    expect(isIdentityConsolePath("/sdk-clients")).toBe(true);
-    expect(isIdentityConsolePath("/processes")).toBe(false);
+  it("recognizes the identity page", () => {
+    expect(isIdentityPath("/identity")).toBe(true);
+    expect(isIdentityPath("/processes")).toBe(false);
   });
 
-  it("allows zitadel admins on /identity and /sdk-clients", () => {
-    const admin = identity(["artificialflow admin"]);
-    const zitadel = config("zitadel");
-    expect(canAccessIdentityConsole(admin, zitadel)).toBe(true);
-    expect(isDashboardPathAllowed({ path: "/identity", identity: admin, config: zitadel })).toBe(true);
-    expect(isDashboardPathAllowed({ path: "/sdk-clients", identity: admin, config: zitadel })).toBe(true);
+  it("gives admins every page", () => {
+    for (const path of ["/", "/processes", "/decisions", "/modeler", "/instances", "/instances/1", "/history", "/incidents", "/identity", "/analytics"]) {
+      expect(allowed(path, ["artificialflowadmin"])).toBe(true);
+    }
   });
 
-  it("denies identity console when admin detection fails even if other roles exist", () => {
-    const modeler = identity(["artificialflow modeler"]);
-    const zitadel = config("zitadel");
-    expect(isDashboardPathAllowed({ path: "/identity", identity: modeler, config: zitadel })).toBe(false);
-    expect(identityConsoleDeniedMessage(modeler, zitadel)).toMatch(/artificialflow admin/i);
+  it("limits business users to modeling pages", () => {
+    const business = ["ArtificialFlowBusiness"];
+    for (const path of ["/processes", "/decisions", "/modeler"]) {
+      expect(allowed(path, business)).toBe(true);
+    }
+    for (const path of ["/", "/instances", "/instances/1", "/history", "/incidents", "/identity", "/analytics"]) {
+      expect(allowed(path, business)).toBe(false);
+    }
   });
 
-  it("denies identity console outside bundled zitadel mode", () => {
-    const admin = identity(["artificialflow admin"]);
-    const external = config("external");
-    expect(isDashboardPathAllowed({ path: "/identity", identity: admin, config: external })).toBe(false);
-    expect(identityConsoleDeniedMessage(admin, external)).toMatch(/bundled ZITADEL/i);
+  it("gives analytics users the analytics placeholder only", () => {
+    expect(allowed("/analytics", ["artificialflowanalytics"])).toBe(true);
+    expect(allowed("/processes", ["artificialflowanalytics"])).toBe(false);
   });
 
-  it("hides incidents paths when the frontend incidents UI is disabled", () => {
-    const admin = identity(["artificialflow admin"]);
-    const zitadel = config("zitadel");
-    expect(isDashboardPathAllowed({ path: "/incidents", identity: admin, config: zitadel })).toBe(false);
-    expect(
-      isDashboardPathAllowed({
-        path: "/incidents",
-        identity: admin,
-        config: zitadel,
-        showIncidentsUi: true,
-      }),
-    ).toBe(true);
+  it("denies client service accounts and custom roles", () => {
+    for (const roles of [["artificialflowclient"], ["finance reviewer"]]) {
+      expect(allowed("/processes", roles)).toBe(false);
+      expect(allowed("/identity", roles)).toBe(false);
+    }
+  });
+
+  it("respects disabled decisions and incidents UIs", () => {
+    expect(allowed("/incidents", ["artificialflowadmin"], { incidents: false })).toBe(false);
+    expect(allowed("/decisions", ["artificialflowadmin"], { decisions: false })).toBe(false);
   });
 });

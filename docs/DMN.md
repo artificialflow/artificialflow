@@ -1,10 +1,26 @@
 # Decision tables (DMN-lite)
 
-ArtificialFlow evaluates JSON decision tables referenced by `artificialflow:decisionRef` on business-rule tasks.
+ArtificialFlow evaluates JSON decision tables and a strict decision-table XML
+subset referenced by `artificialflow:decisionRef` on business-rule tasks.
+
+## Supported decision-table XML subset
+
+The XML importer accepts one DMN 1.3 `decision` containing one
+`decisionTable`. Supported elements are `input`/`inputExpression`,
+named `output`, `rule`, `inputEntry`, `outputEntry`, and `text`. Only the
+`FIRST` hit policy is supported. Input entries accept `-`, scalar equality,
+and the unary comparisons `=`, `!=`, `>`, `>=`, `<`, and `<=`. Output entries
+must be JSON scalars (quoted strings, numbers, booleans, or `null`).
+
+Other decision kinds, hit policies, FEEL functions, ranges, lists, contexts,
+and multi-decision documents are rejected during deployment with an explicit
+unsupported-construct error. They are never silently approximated.
 
 ## UI upload
 
-Open **Decisions** in the ArtificialFlow console (admin or modeler). Upload a JSON file or paste the decision table, then **Deploy**. Use **Evaluate** to dry-run inputs without starting a process.
+Open **Decisions** in the ArtificialFlow console (`artificialflowadmin` or `artificialflowbusiness`). Upload a
+JSON or DMN XML file, or paste the decision table, then **Deploy**. Use
+**Evaluate** to dry-run inputs without starting a process.
 
 ## Deploy (API)
 

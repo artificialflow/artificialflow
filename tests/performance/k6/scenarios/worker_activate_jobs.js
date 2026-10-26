@@ -27,30 +27,24 @@ const WORKER_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
   </bpmn:process>
 </bpmn:definitions>`;
 
-let workerWorkflowId = null;
-
-function ensureWorkerWorkflow() {
-  if (workerWorkflowId) {
-    return workerWorkflowId;
-  }
+export function setupWorkerWorkflow() {
   const deployRes = http.post(
     `${BASE}/workflows`,
     WORKER_BPMN,
     { headers: authHeaders({ "Content-Type": "text/xml; charset=utf-8" }) }
   );
   if (deployRes.status !== 200) {
-    return null;
+    throw new Error(`worker workflow deployment failed: HTTP ${deployRes.status}`);
   }
   try {
-    workerWorkflowId = JSON.parse(deployRes.body).id;
+    return JSON.parse(deployRes.body).id;
   } catch (_) {
-    workerWorkflowId = null;
+    throw new Error("worker workflow deployment returned an invalid payload");
   }
-  return workerWorkflowId;
 }
 
-export function workerActivateJobs() {
-  const workflowId = ensureWorkerWorkflow();
+export function workerActivateJobs(data) {
+  const workflowId = data && data.workerWorkflowId;
   if (workflowId) {
     http.post(
       `${BASE}/instances`,

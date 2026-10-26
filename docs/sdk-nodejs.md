@@ -1,281 +1,155 @@
 # Node.js SDK
 
-The Node.js SDK package is `@artificialflow/nodejs-sdk`.
+Package: `@artificialflow/nodejs-sdk` (TypeScript, Node.js 20+).
 
-Integrating from another language, a BFF, or without npm? Use the raw
-[HTTP API guide](API.md) — the SDK is a thin client over the same gateway
-contract (`…/api` and `…/api/query`).
+The SDK is a thin client over the gateway HTTP contract described in
+[API.md](API.md). Anything it does can also be done with plain HTTP. The
+[.NET](sdk-dotnet.md) and [Java](sdk-java.md) SDKs expose the same operations
+with the same names.
 
-## Prerequisites
-
-- Node.js 20 or newer.
-- A running ArtificialFlow gateway.
-- A non-human IAM identity with only the `artificialflow client` role.
-- An access token whose issuer and audience match the ArtificialFlow deployment.
-- `curl` and `jq` only when using the shell-based external-IAM smoke example.
-
-The SDK always calls ArtificialFlow with `Authorization: Bearer <access-token>`. The
-difference between bundled and external IAM is how that access token is
-obtained and refreshed.
-
-## Installation
+## Install
 
 ```bash
 npm install @artificialflow/nodejs-sdk
 ```
 
-The wrapper version and its `@artificialflow/nodejs-sdk` dependency must exactly
-match the canonical package version.
-
-Release tags publish prerelease versions such as `0.3.0-rc.1` with npm dist-tag
-`next`; stable versions publish with `latest`. The release workflow publishes
-the canonical package first and publishes the deprecated wrapper only after
-that succeeds. Both use `npm publish --provenance` on a GitHub-hosted runner
-with `id-token: write`; local `npm pack --dry-run` validation does not publish
-or create registry provenance.
-
-For local development from the repository:
+From the repository:
 
 ```bash
 cd clients/nodejs-sdk
 npm ci
 npm run build
-```
-
-The local package can be verified with:
-
-```bash
 npm test
 npm run validate:package
 ```
 
-## Common client configuration
+## Create a client
 
 ```ts
 import { ArtificialFlowClient } from '@artificialflow/nodejs-sdk';
 
 const client = new ArtificialFlowClient({
-  baseUrl: 'https://app.artificialflow.example.io/api',
+  baseUrl: 'https://app.example.com/api/v1',
 });
 ```
 
-`baseUrl` defaults to `http://localhost:9100/api`. The query URL defaults to
-`${baseUrl}/query`, which matches the ArtificialFlow gateway route. Set `queryBaseUrl`
-only when calling the query service through a different address.
+| Option | Default | Notes |
+| :--- | :--- | :--- |
+| `baseUrl` | `http://localhost:9100/api/v1` | Gateway command API. `/api` (unversioned) also works. |
+| `queryBaseUrl` | `${baseUrl}/query` | Set only when the query service has a different address. |
+| `token` | — | Static token string or `() => string \| Promise<string>` callback. |
+| `auth` | — | Built-in OAuth client-credentials provider. |
+| `headers` | — | Extra headers (object or async callback) on every request. |
+| `timeoutMs` | — | Per-request timeout. |
 
-Configure exactly one of `auth` or `token`. The SDK rejects a client configured
-with both.
+Configure at most one of `token` and `auth`; the SDK rejects both together.
 
-## Bundled ZITADEL authentication
+## Authentication
 
-Bundled IAM uses a ZITADEL JWT Profile service-account credential.
+What to configure depends on the deployment's `IAM_DEPLOYMENT_MODE`
+(see [iam.md](iam.md)).
 
-### Create the credential
+### `IAM_DEPLOYMENT_MODE=false` (no IAM provider)
 
-1. Sign in to ArtificialFlow as an `artificialflow admin`.
-2. Open **SDK Clients**.
-3. Create a client. ArtificialFlow assigns only `artificialflow client`.
-4. Generate/download the service-account profile. The browser generates an
-   RSA-2048 key pair and uploads only the public key.
-5. Move the downloaded JSON directly into a secret manager. The private key is
-   shown only once and cannot be recovered from ArtificialFlow.
-
-### Configure the SDK
+Configure neither `token` nor `auth`. The SDK sends no `Authorization` header
+and every call runs as `artificialflowadmin`.
 
 ```ts
-import fs from 'node:fs';
-import {
-  ArtificialFlowClient,
-  type ZitadelJwtProfile,
-} from '@artificialflow/nodejs-sdk';
-
-const profile = JSON.parse(
-  fs.readFileSync('/run/secrets/artificialflow-sdk-profile.json', 'utf8'),
-) as ZitadelJwtProfile;
-
-const client = new ArtificialFlowClient({
-  baseUrl: 'https://app.artificialflow.example.io/api',
-  auth: {
-    type: 'zitadel-jwt-profile',
-    profile,
-    refreshSkewMs: 30_000,
-    assertionTtlMs: 300_000,
-  },
-});
+const client = new ArtificialFlowClient({ baseUrl: 'http://localhost:9100/api/v1' });
 ```
 
-The downloaded profile contains:
+### `IAM_DEPLOYMENT_MODE=true` (external OIDC provider)
 
-```json
-{
-  "type": "serviceaccount",
-  "keyId": "key-id",
-  "key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "userId": "machine-user-id",
-  "issuer": "https://iam.artificialflow.example.io",
-  "tokenUrl": "https://iam.artificialflow.example.io/oauth/v2/token",
-  "scopes": [
-    "openid",
-    "urn:zitadel:iam:org:projects:roles",
-    "urn:zitadel:iam:org:project:id:project-id:aud"
-  ]
-}
-```
+In the provider:
 
-The SDK:
-
-- creates an RS256 assertion valid for no more than five minutes;
-- exchanges it at ZITADEL's token endpoint;
-- caches the short-lived access token;
-- coalesces concurrent refreshes; and
-- refreshes before expiration.
-
-`refreshSkewMs` defaults to 30 seconds. `assertionTtlMs` defaults to five
-minutes and cannot exceed five minutes. Both automatic providers keep one token
-in process memory, do not use refresh tokens, and do not automatically retry or
-back off after a rejected exchange. Recreating the client loses the cache.
-
-The private key is used locally to sign assertions and is never sent to ArtificialFlow.
-Do not put the JSON profile in source control, logs, command-line arguments,
-frontend storage, or a plain environment variable.
-
-Rotate a bundled credential by creating a replacement key, deploying the new
-profile, verifying it, and then revoking the old key. Revoking the key blocks
-new exchanges; an already-issued access token remains valid until expiry.
-
-Raw legacy PATs remain accepted only for staged migration where the deployment
-enables them. New integrations should use JWT Profile.
-
-Bundled client keys default to 90 days and cannot exceed 365 days. Create a
-replacement before expiry. The SDK's identity client-token methods target the
-legacy PAT endpoints; with the default policy, PAT creation and rotation are
-disabled. Create new private-key credentials through **SDK Clients**.
-
-## External IAM authentication
-
-### Provider prerequisites
-
-In the external provider:
-
-1. Create a confidential machine-to-machine application.
-2. Enable the OAuth 2.0 client-credentials grant.
-3. Assign only `artificialflow client`.
-4. Include the role in the claim configured by ArtificialFlow's
+1. Create a confidential machine-to-machine application with the OAuth 2.0
+   client-credentials grant.
+2. Assign only `artificialflowclient`, mapped into the claim configured by
    `AUTH_CLAIM_ROLES_PATH`.
-5. Include the ArtificialFlow backend audience, normally `workflow-backend`.
-6. Use short access-token lifetimes and establish a secret-rotation procedure.
+3. Include the ArtificialFlow backend audience (`AUTH_CLIENT_ID`, normally
+   `workflow-backend`).
+4. Keep access tokens short-lived and rotate the secret.
 
-### SDK-managed client credentials
-
-The SDK can acquire, cache, and refresh a standard client-credentials token:
+**SDK-managed client credentials** (cached and refreshed before expiry):
 
 ```ts
-import { ArtificialFlowClient } from '@artificialflow/nodejs-sdk';
-
 const client = new ArtificialFlowClient({
-  baseUrl: 'https://app.artificialflow.example.io/api',
+  baseUrl: 'https://app.example.com/api/v1',
   auth: {
     type: 'oauth-client-credentials',
     profile: {
       type: 'oauth-client-credentials',
-      tokenUrl: 'https://login.example.com/oauth2/token',
+      tokenUrl: 'https://<your-oidc-provider>/oauth2/token',
       clientId: process.env.ARTIFICIALFLOW_CLIENT_ID!,
       clientSecret: process.env.ARTIFICIALFLOW_CLIENT_SECRET!,
+      // scopes: ['...'],  // only when the provider requires them
     },
     refreshSkewMs: 30_000,
   },
 });
 ```
 
-For local Keycloak with the SDK running on the host, the token URL is typically:
+The built-in provider sends `client_id` and `client_secret` in the form body
+and expects a Bearer `access_token` with numeric `expires_in`. Token URLs must
+be HTTPS except loopback addresses. For Keycloak the token URL is
+`https://<host>/realms/<realm>/protocol/openid-connect/token`.
 
-```text
-http://localhost:8180/realms/artificialflow/protocol/openid-connect/token
-```
-
-The provider must accept `client_id` and `client_secret` in the form body and
-return a Bearer `access_token` with numeric `expires_in`. Token endpoints must
-use HTTPS, except loopback URLs such as `http://localhost` during local testing.
-Add the optional `scopes` array only when your provider requires explicit
-client-credentials scopes.
-
-Some providers require HTTP Basic client authentication or additional
-`audience`/`resource` parameters. In that case, use the provider's OAuth
-library and pass a token callback:
+**Provider library callback**, when the provider needs HTTP Basic client
+authentication or extra `audience`/`resource` parameters:
 
 ```ts
 const client = new ArtificialFlowClient({
-  baseUrl: 'https://app.artificialflow.example.io/api',
-  token: () => getProviderAccessToken(),
+  baseUrl: 'https://app.example.com/api/v1',
+  token: () => getProviderAccessToken(), // raw token, no "Bearer " prefix
 });
 ```
 
-Implement `getProviderAccessToken` with the provider's supported OAuth library,
-including its required caching and refresh behavior. The callback must return
-only the token text, without the `Bearer ` prefix.
-
-### Pre-acquired external token
-
-A static token is convenient for a short smoke test:
+**Static token**, for short smoke tests only:
 
 ```ts
-const client = new ArtificialFlowClient({
-  baseUrl: 'http://localhost:9100/api',
-  token: process.env.ARTIFICIALFLOW_TOKEN,
-});
+const client = new ArtificialFlowClient({ token: process.env.ARTIFICIALFLOW_TOKEN });
 ```
 
-Do not use a static token for a long-running worker unless another component
-refreshes and replaces it.
+`client.setToken(value)` replaces any configured provider with that raw token
+for later requests.
 
-Calling `client.setToken(value)` disables any configured automatic auth
-provider for that client instance and switches subsequent requests to the
-supplied raw token.
+## Operations
 
-## Smoke Test
+Method names match the OpenAPI `operationId`s.
 
-Build the local SDK before running `examples/sdk-smoke-test.js`:
+| Area | Methods |
+| :--- | :--- |
+| Health and identity | `commandHealth`, `queryHealth`, `getIdentity`, `getQueryIdentity`, `getIdentityConfig` |
+| Workflows | `deployWorkflow`, `listWorkflows`, `searchWorkflows`, `getWorkflow`, `deleteWorkflow` |
+| Decisions | `deployDecision`, `listDecisions`, `evaluateDecision` |
+| Instances | `startInstance`, `listInstances`, `listCompletedInstances`, `getInstance`, `deleteInstance`, `updateInstanceVariables`, `completeInstanceStep` |
+| Instance migration (admin) | `dryRunInstanceMigration`, `migrateInstance` |
+| Query (projected, eventually consistent) | `searchInstances`, `getProjectedInstance`, `searchWorkflows` |
+| Events | `publishMessage`, `publishSignal`, `publishEscalation` |
+| User tasks | `searchTasks`, `listInstanceTasks`, `claimUserTask`, `completeUserTask` |
+| Jobs | `getJobCapabilities`, `activateJobs`, `completeJob`, `failJob`, `extendJobLock`, `createWorker` |
+| Operations (admin) | `listInstanceJobs`, `retryJob`, `listIncidents`, `resolveIncident`, `getEngineMetrics` |
 
-```bash
-cd clients/nodejs-sdk
-npm ci
-npm test
-npm run validate:package
+`getEngineMetrics` calls `/internal/metrics`, which the public gateway does not
+route; point the client at the command service directly to use it.
+
+Every method accepts a trailing `RequestOptions` with `correlationId`,
+`idempotencyKey`, `headers`, and an `AbortSignal`.
+
+### Deploy and start
+
+```ts
+import { readFile } from 'node:fs/promises';
+
+await client.deployWorkflow(await readFile('order-process.bpmn', 'utf8'));
+const instance = await client.startInstance('order-process', { orderId: '123' });
 ```
 
-Set exactly one authentication input.
+`startInstance` accepts a definition key or a BPMN process id (which starts the
+latest version). To pin a version of a process id, call `POST /instances` with
+`version` over HTTP; see [PROCESS_VERSIONING.md](PROCESS_VERSIONING.md).
 
-Bundled ZITADEL:
-
-```bash
-ARTIFICIALFLOW_ZITADEL_PROFILE_FILE=/run/secrets/artificialflow-service-account.json \
-  ARTIFICIALFLOW_BASE_URL=http://localhost:9100/api \
-  node examples/sdk-smoke-test.js
-```
-
-External IAM:
-
-```bash
-export ARTIFICIALFLOW_TOKEN="$(
-  curl -fsS -X POST "${OIDC_TOKEN_URL}" \
-    -H 'content-type: application/x-www-form-urlencoded' \
-    -d grant_type=client_credentials \
-    -d client_id="${OIDC_CLIENT_ID}" \
-    -d client_secret="${OIDC_CLIENT_SECRET}" |
-  jq -er '.access_token'
-)"
-
-ARTIFICIALFLOW_BASE_URL=http://localhost:9100/api \
-  node examples/sdk-smoke-test.js
-
-unset ARTIFICIALFLOW_TOKEN
-```
-
-Add provider-specific scopes and audience/resource parameters when required.
-Never include `Bearer ` in `ARTIFICIALFLOW_TOKEN`.
-`ARTIFICIALFLOW_*` equivalents.
-
-### Publishing events
+### Publish events
 
 ```ts
 await client.publishMessage('MsgOrderPlaced', 'order-123', { amount: 100 });
@@ -283,54 +157,127 @@ await client.publishSignal('OrderApproved', { orderId: '123' });
 await client.publishEscalation('NEED_HELP', { reason: 'timeout' });
 ```
 
-`publishEscalation` maps to `POST /escalations` with `{ escalation_code, payload }`
-and correlates to escalation catch/boundary events, escalation start events, and
-matching event sub-processes. User-task due-date breaches also publish the code
+Escalations correlate to escalation catch/boundary events, escalation start
+events, and matching event sub-processes. User-task due-date breaches publish
 `user-task.due-date.breached` from the runtime scheduler.
 
-Optional smoke-test inputs:
-
-- `ARTIFICIALFLOW_WORKFLOW_KEY`: workflow definition key or ID to start.
-- `ARTIFICIALFLOW_BUSINESS_KEY`: business key for the new instance.
-- `ARTIFICIALFLOW_MESSAGE_NAME` and `ARTIFICIALFLOW_MESSAGE_CORRELATION_KEY`: message to
-  publish.
-- `ARTIFICIALFLOW_WORKER_JOB_TYPE`: activate and complete one service job.
-
-The smoke test is successful when it retrieves the authenticated principal,
-lists workflows, and completes every optional operation that was configured.
-The principal must contain `artificialflow client` and the expected audience.
-
-## Human task inbox applications
-
-Keep the `artificialflow client` credential in a trusted backend-for-frontend. Never
-send it to browser code. Authenticate the human user separately, reject
-admin/client identities from the end-user inbox, and pass the acting identity
-on each inbox request:
+### Decisions
 
 ```ts
-const actingUser = {
-  subject: signedInUser.subject,
-  username: signedInUser.username,
-  email: signedInUser.email,
-  name: signedInUser.name,
-  roles: signedInUser.roles,
-};
-
-const inbox = await client.listInboxItems({ actingUser });
+await client.deployDecision('invoice_decision', 'Invoice routing', JSON.stringify(table));
+const outputs = await client.evaluateDecision('invoice_decision', { amount: 1500 });
 ```
+
+### Bounded instance migration (admin)
+
+```ts
+const migration = {
+  sourceDefinitionKey: '101',
+  targetDefinitionKey: '202',
+  elementMapping: { review: 'review_v2' },
+  operationId: crypto.randomUUID(),
+};
+await client.dryRunInstanceMigration('9001', migration);
+await client.migrateInstance('9001', migration);
+```
+
+Rejected requests return the stable migration `reasonCode`. See
+[INSTANCE_MIGRATION.md](INSTANCE_MIGRATION.md).
+
+## User-task applications
+
+ArtificialFlow does not authenticate the end users of your application. Sign
+them in with your own IAM and validate their tokens in your backend. Keep the
+`artificialflowclient` credential in that backend and pass the end user's
+identity as plain values:
+
+```ts
+const tasks = await client.searchTasks({
+  candidateUser: signedInUser.email,
+  candidateGroups: signedInUser.groups,
+  includeUnassigned: true,
+});
+
+const task = tasks[0];
+await client.claimUserTask(task.processInstanceKey, task.executionId, signedInUser.email);
+await client.completeUserTask(task.processInstanceKey, task.executionId, signedInUser.email);
+```
+
+`assignee`, `candidateUser`, and `candidateGroups` are OR-combined; `state` is
+`active` (default), `completed`, or `all`. Client tokens must pass the assignee
+on claim and complete, and completing requires the assignee that claimed the
+task. See [API.md](API.md#user-tasks-api).
+
+## Job workers
+
+```ts
+const worker = client.createWorker('payment-service', async (job, context) => {
+  return { paymentStatus: 'success' };          // completes the job with these variables
+}, {
+  workerName: 'payment-worker',
+  maxJobs: 32,
+  pollIntervalMs: 1000,
+  timeoutMs: 5000,
+  lockDurationMs: 30_000,
+  autoStart: true,
+});
+
+process.on('SIGINT', () => worker.stop());
+```
+
+A thrown handler fails the job; `failRetries(job, error)` can override the
+remaining retries and `onError` receives poll-loop errors. Inside the handler,
+`context.complete`, `context.fail`, and `context.extendLock` give manual
+control. Job mutations send `Idempotency-Key` and the worker protocol header
+`X-Workflow-Worker-Protocol-Version: v1`.
+
+## Errors
+
+Non-2xx responses throw `ArtificialFlowApiError` with `status`, `body`,
+`method`, `path`, `correlationId`, and, on `/api/v1`, the parsed RFC 9457
+`problem`. Token acquisition failures throw `OAuthClientCredentialsAuthError`.
+
+- `401`: token missing, expired, or wrong issuer/audience (`IAM_DEPLOYMENT_MODE=true`).
+- `403`: valid token without a permitted role.
+- `409`: user task already claimed by someone else, or completed by a different assignee.
+
+## Smoke test
+
+`examples/sdk-smoke-test.js` checks a running deployment. It reads
+`ARTIFICIALFLOW_BASE_URL` (default `http://localhost:9100/api`) and at most one
+credential: `ARTIFICIALFLOW_TOKEN` (raw token, no `Bearer `), or
+`OIDC_TOKEN_URL` + `OIDC_CLIENT_ID` + `OIDC_CLIENT_SECRET`. Set none with
+`IAM_DEPLOYMENT_MODE=false`.
+
+```bash
+cd clients/nodejs-sdk && npm ci && npm run build
+
+ARTIFICIALFLOW_BASE_URL=http://localhost:9100/api \
+ARTIFICIALFLOW_WORKFLOW_KEY=order-process \
+ARTIFICIALFLOW_BUSINESS_KEY=order-123 \
+ARTIFICIALFLOW_MESSAGE_NAME=MsgOrderPlaced \
+ARTIFICIALFLOW_MESSAGE_CORRELATION_KEY=order-123 \
+ARTIFICIALFLOW_WORKER_JOB_TYPE=payment-service \
+  node examples/sdk-smoke-test.js
+```
+
+The optional `ARTIFICIALFLOW_*` inputs start an instance, publish a message,
+and activate and complete one job. The test passes when it reads the principal,
+lists workflows, and finishes every configured step.
 
 ## Operational requirements
 
-- Store external client secrets and bundled service-account profiles in a
-  secret manager.
-- Keep machine identities limited to `artificialflow client`.
-- Use separate credentials per application or worker.
+- Store OIDC client secrets in a secret manager; never ship them or tokens to
+  browser code.
+- Keep machine identities limited to `artificialflowclient` and use separate
+  credentials per application or worker.
 - Rotate credentials with overlap and test the replacement before revocation.
-- Do not log tokens, client secrets, JWT assertions, or private profiles.
-- Treat `401` as a token acquisition/issuer/audience/expiry problem.
-- Treat `403` as a valid token with an insufficient or prohibited role.
-- Stop workers cleanly during shutdown so locked jobs can be recovered.
+- Do not log tokens or client secrets.
+- Stop workers cleanly on shutdown so locked jobs can be recovered.
 
 ## Publishing
 
-The package should be published from a signed release tag through GitHub Actions with npm provenance enabled. Manual workflow dispatches default to validation and package dry-run only unless publishing is explicitly enabled by maintainers.
+Releases publish from a signed tag through GitHub Actions with
+`npm publish --provenance`. Prereleases such as `1.3.0-rc.1` use the npm
+dist-tag `next`; stable versions use `latest`. Manual workflow dispatches only
+validate and dry-run the package unless maintainers enable publishing.

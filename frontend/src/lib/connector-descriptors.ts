@@ -1,3 +1,5 @@
+import descriptorSource from "../../../connectors/internal/common/descriptors.json";
+
 export type ConnectorFieldKind = "string" | "number" | "boolean" | "json";
 
 export interface ConnectorField {
@@ -16,63 +18,8 @@ export interface ConnectorDescriptor {
   fields: ConnectorField[];
 }
 
-/** Official ArtificialFlow connector job types and input schemas. */
-export const CONNECTOR_DESCRIPTORS: ConnectorDescriptor[] = [
-  {
-    jobType: "io.artificialflow.connector.http",
-    name: "HTTP",
-    description: "Outbound HTTP request",
-    fields: [
-      { key: "url", label: "URL", required: true, kind: "string", description: "Absolute HTTPS/HTTP URL" },
-      { key: "method", label: "Method", required: false, kind: "string", default: "POST", description: "HTTP method" },
-      { key: "headers", label: "Headers", required: false, kind: "json", description: "JSON object of headers" },
-      { key: "body", label: "Body", required: false, kind: "json", description: "JSON-serializable request body" },
-      { key: "timeoutMs", label: "Timeout (ms)", required: false, kind: "number", default: "10000", description: "Request timeout in milliseconds" },
-      { key: "failOnNon2xx", label: "Fail on non-2xx", required: false, kind: "boolean", default: "true", description: "Fail the job when the response status is not 2xx" },
-    ],
-  },
-  {
-    jobType: "io.artificialflow.connector.webhook",
-    name: "Webhook",
-    description: "POST to a webhook URL (e.g. Slack)",
-    fields: [
-      { key: "webhookUrl", label: "Webhook URL", required: true, kind: "string", description: "Absolute webhook URL" },
-      { key: "payload", label: "Payload", required: false, kind: "json", description: "JSON payload body" },
-      { key: "webhookToken", label: "Webhook Token", required: false, kind: "string", description: "Optional Bearer token" },
-    ],
-  },
-  {
-    jobType: "io.artificialflow.connector.kafka",
-    name: "Kafka",
-    description: "Publish a Kafka message",
-    fields: [
-      { key: "kafkaTopic", label: "Topic", required: true, kind: "string", description: "Kafka topic" },
-      { key: "kafkaKey", label: "Key", required: false, kind: "string", description: "Optional message key" },
-      { key: "kafkaValue", label: "Value", required: false, kind: "json", description: "Message value (JSON or string)" },
-    ],
-  },
-  {
-    jobType: "io.artificialflow.connector.email",
-    name: "Email",
-    description: "Send email via SMTP",
-    fields: [
-      { key: "emailTo", label: "To", required: true, kind: "string", description: "Recipient address" },
-      { key: "emailSubject", label: "Subject", required: true, kind: "string", description: "Email subject" },
-      { key: "emailBody", label: "Body", required: false, kind: "string", description: "Email body" },
-    ],
-  },
-  {
-    jobType: "io.artificialflow.connector.s3",
-    name: "S3",
-    description: "Put object to S3-compatible storage",
-    fields: [
-      { key: "s3Bucket", label: "Bucket", required: true, kind: "string", description: "S3 bucket name" },
-      { key: "s3Key", label: "Key", required: true, kind: "string", description: "Object key" },
-      { key: "s3Body", label: "Body", required: false, kind: "string", description: "Object body" },
-      { key: "contentType", label: "Content-Type", required: false, kind: "string", description: "MIME type" },
-    ],
-  },
-];
+/** Official connector job types and inputs from the canonical shared descriptor. */
+export const CONNECTOR_DESCRIPTORS = descriptorSource as ConnectorDescriptor[];
 
 export function getConnectorDescriptor(jobType: string): ConnectorDescriptor | undefined {
   return CONNECTOR_DESCRIPTORS.find((d) => d.jobType === jobType);

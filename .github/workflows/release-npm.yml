@@ -23,7 +23,7 @@ on:
       tag:
         description: Release tag to validate
         required: true
-        default: v1.1.0
+        default: v1.2.0
       publish:
         description: Direct publication is refused; use the Release orchestrator
         required: true
@@ -146,6 +146,34 @@ jobs:
       - name: Package dry run
         run: npm pack --dry-run
 
+      - name: Pack immutable package candidate
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --json > npm-pack.json
+          filename="$(node -p "require('./npm-pack.json')[0].filename")"
+          integrity="$(node -p "require('./npm-pack.json')[0].integrity")"
+          sha256="$(shasum -a 256 "${filename}" | awk '{print $1}')"
+          {
+            echo "filename=${filename}"
+            echo "integrity=${integrity}"
+            echo "sha256=${sha256}"
+          } >> "${GITHUB_OUTPUT}"
+          node - "${{ steps.release.outputs.version }}" "${integrity}" "${sha256}" <<'NODE' > candidate-packages.json
+          const [version, integrity, sha256] = process.argv.slice(2);
+          console.log(JSON.stringify({
+            schemaVersion: 1,
+            commitSha: process.env.GITHUB_SHA,
+            packages: [{
+              name: "@artificialflow/nodejs-sdk",
+              version,
+              integrity,
+              tarballSha256: sha256
+            }]
+          }, null, 2));
+          NODE
+
       - name: Validate generated protobuf drift
         working-directory: .
         run: bash scripts/validate_generated_proto.sh
@@ -163,10 +191,21 @@ jobs:
           name: artificialflow-nodejs-sdk-sbom
           path: clients/nodejs-sdk/artificialflow-nodejs-sdk-sbom.cdx.json
           if-no-files-found: error
+          retention-days: 365
+
+      - name: Upload candidate package lock and bytes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-packages
+          path: |
+            clients/nodejs-sdk/candidate-packages.json
+            clients/nodejs-sdk/${{ steps.package.outputs.filename }}
+          if-no-files-found: error
+          retention-days: 365
 
       - name: Publish
         if: ${{ steps.release.outputs.publish == 'true' }}
-        run: npm publish --access public --provenance --tag "${{ steps.release.outputs.dist_tag }}"
+        run: npm publish "${{ steps.package.outputs.filename }}" --access public --provenance --tag "${{ steps.release.outputs.dist_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

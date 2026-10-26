@@ -27,8 +27,9 @@ Add these topics to improve discovery:
 - `react`
 - `docker`
 - `oidc`
-- `zitadel`
 - `sdk`
+- `dotnet`
+- `java`
 
 ## Starter Issues
 
@@ -42,7 +43,7 @@ Create initial issues after the public repository is ready.
 | `runtime` | Add BPMN compatibility examples for advanced gateway behavior. |
 | `iam` | Add external IAM provider setup recipes. |
 | `frontend` | Improve modeler validation and inline BPMN lint feedback. |
-| `help wanted` | Add browser E2E coverage for the bundled ZITADEL quickstart. |
+| `help wanted` | Add browser E2E coverage for the external OIDC quickstart (Keycloak). |
 
 ## Release Readiness
 

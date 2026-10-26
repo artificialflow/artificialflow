@@ -2,6 +2,9 @@ package id
 
 import (
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,6 +82,41 @@ func InitDefaultNode(nodeID int64) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+// ResolveSnowflakeNodeID returns a node ID that is stable and unique for a
+// command replica. An explicit value takes precedence; otherwise a Kubernetes
+// StatefulSet ordinal is extracted from the pod name.
+func ResolveSnowflakeNodeID(explicit, podName string) (int64, error) {
+	value := strings.TrimSpace(explicit)
+	if value != "" {
+		nodeID, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse SNOWFLAKE_NODE_ID: %w", err)
+		}
+		if _, err := NewNode(nodeID); err != nil {
+			return 0, fmt.Errorf("validate SNOWFLAKE_NODE_ID: %w", err)
+		}
+		return nodeID, nil
+	}
+
+	name := strings.TrimSpace(podName)
+	if name == "" {
+		return 1, nil
+	}
+	separator := strings.LastIndexByte(name, '-')
+	if separator < 0 || separator == len(name)-1 {
+		return 0, fmt.Errorf("POD_NAME %q has no StatefulSet ordinal", name)
+	}
+	ordinal, err := strconv.ParseInt(name[separator+1:], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse StatefulSet ordinal from POD_NAME %q: %w", name, err)
+	}
+	nodeID := ordinal + 1
+	if _, err := NewNode(nodeID); err != nil {
+		return 0, fmt.Errorf("validate node ID derived from POD_NAME %q: %w", name, err)
+	}
+	return nodeID, nil
 }
 
 // GenerateSnowflake generates an int64 ID using the default node

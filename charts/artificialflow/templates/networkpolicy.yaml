@@ -1,0 +1,133 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $full := include "artificialflow.fullname" . }}
+{{- $ext := .Values.networkPolicy.external }}
+{{- $apps := list "command" "query" "runtime" "sync-worker" }}
+{{- /* Bundled data plane: who may connect in, on which ports, and any peer egress. */}}
+{{- $dataPlane := list
+  (dict "name" "postgresql" "enabled" .Values.postgresql.bundled.enabled "ports" (list 5432) "from" (append $apps "connect"))
+  (dict "name" "elasticsearch" "enabled" .Values.search.bundled.enabled "ports" (list 9200) "from" $apps)
+  (dict "name" "kafka" "enabled" .Values.kafka.bundled.enabled "ports" (list 9092 9093) "from" (concat $apps (list "connect" "kafka")) "egress" (list (dict "to" "kafka" "ports" (list 9092 9093))))
+  (dict "name" "connect" "enabled" .Values.connect.bundled.enabled "ports" (list 8083) "from" $apps "egress" (list (dict "to" "kafka" "ports" (list 9092)) (dict "to" "postgresql" "ports" (list 5432))))
+}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-default-deny
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-dns
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchExpressions: [{key: k8s-app, operator: In, values: [kube-dns, coredns]}]}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-gateway
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "artificialflow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace | default "ingress-nginx" }}}}}]
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to: [{podSelector: {matchExpressions: [{key: app.kubernetes.io/component, operator: In, values: [frontend, command, query]}]}}]
+      ports: [{protocol: TCP, port: 80}, {protocol: TCP, port: 8080}, {protocol: TCP, port: 8081}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-application-ingress
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchExpressions: [{key: app.kubernetes.io/component, operator: In, values: [frontend, command, query]}]}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/component: gateway}}}]
+      ports: [{protocol: TCP, port: 80}, {protocol: TCP, port: 8080}, {protocol: TCP, port: 8081}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-service-egress
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchExpressions: [{key: app.kubernetes.io/component, operator: In, values: {{ toJson $apps }}}]}
+  policyTypes: [Egress]
+  egress:
+    {{- range $rule := list (list $ext.postgresqlCIDRs (list .Values.postgresql.port)) (list $ext.brokerCIDRs (list 9092)) (list $ext.searchCIDRs (list 9200)) (list $ext.iamCIDRs (list 443)) (list $ext.telemetryCIDRs (list 4317 4318)) }}
+    {{- $ports := index $rule 1 }}
+    {{- range $cidr := index $rule 0 }}
+    - to: [{ipBlock: {cidr: {{ $cidr | quote }}}}]
+      ports: [{{ range $i, $p := $ports }}{{ if $i }}, {{ end }}{protocol: TCP, port: {{ $p }}}{{ end }}]
+    {{- end }}
+    {{- end }}
+    {{- range $dataPlane }}
+    {{- if .enabled }}
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/component: {{ .name }}}}}]
+      ports: [{protocol: TCP, port: {{ first .ports }}}]
+    {{- end }}
+    {{- end }}
+{{- range $dataPlane }}
+{{- if .enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-bundled-{{ .name }}
+  labels:
+    {{- include "artificialflow.labels" $ | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: {{ .name }}}}
+  policyTypes: [{{ ternary "Ingress, Egress" "Ingress" (hasKey . "egress") }}]
+  ingress:
+    - from: [{podSelector: {matchExpressions: [{key: app.kubernetes.io/component, operator: In, values: {{ toJson .from }}}]}}]
+      ports: [{{ range $i, $p := .ports }}{{ if $i }}, {{ end }}{protocol: TCP, port: {{ $p }}}{{ end }}]
+  {{- with .egress }}
+  egress:
+    {{- range . }}
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/component: {{ .to }}}}}]
+      ports: [{{ range $i, $p := .ports }}{{ if $i }}, {{ end }}{protocol: TCP, port: {{ $p }}}{{ end }}]
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.monitoring.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-private-metrics
+  labels:
+    {{- include "artificialflow.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchExpressions: [{key: app.kubernetes.io/component, operator: In, values: [command, query, runtime, sync-worker]}]}
+  policyTypes: [Ingress]
+  ingress:
+    {{- range $ext.telemetryCIDRs }}
+    - from: [{ipBlock: {cidr: {{ . | quote }}}}]
+      ports: [{protocol: TCP, port: 9090}, {protocol: TCP, port: 8092}]
+    {{- end }}
+{{- end }}
+{{- end }}

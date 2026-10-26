@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 
-export type UatDeployment = "bundled-zitadel" | "external-keycloak";
+export type UatDeployment = "external-keycloak";
 
 export interface UatLoginOptions {
   username?: string;
@@ -20,11 +20,7 @@ export async function loginForDeployment(page: Page, deployment: UatDeployment, 
 
   console.log("[uat-auth] clicking sign in");
   await signIn.click();
-  if (deployment === "external-keycloak") {
-    await loginKeycloak(page, options);
-  } else {
-    await loginZitadel(page, options);
-  }
+  await loginKeycloak(page, options);
 
   console.log("[uat-auth] waiting for frontend callback");
   await page.waitForURL((url) => String(url).startsWith(process.env.FRONTEND_URL || "http://localhost:9100"), {
@@ -59,21 +55,6 @@ export async function accessTokenFromBrowser(page: Page): Promise<string> {
     throw new Error("No OIDC access token is available in the authenticated browser session");
   }
   return token;
-}
-
-async function loginZitadel(page: Page, options: UatLoginOptions): Promise<void> {
-  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:9100";
-  console.log("[uat-auth] zitadel login name");
-  const loginName = page.locator("input[name=loginName]:visible").first();
-  await loginName.waitFor({ state: "visible", timeout: 30_000 });
-  await loginName.fill(options.username || process.env.UAT_USERNAME || "admin");
-  await page.getByRole("button", { name: /^continue$/i }).click();
-  console.log("[uat-auth] zitadel password");
-  const password = page.locator("input[name=password]:visible").first();
-  await password.waitFor({ state: "visible", timeout: 30_000 });
-  await password.fill(options.password || process.env.UAT_PASSWORD || "admin");
-  await page.getByRole("button", { name: /^continue$/i }).click();
-  await page.waitForURL((url) => String(url).startsWith(frontendUrl), { timeout: 60_000 });
 }
 
 async function loginKeycloak(page: Page, options: UatLoginOptions): Promise<void> {

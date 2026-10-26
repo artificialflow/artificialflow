@@ -2,18 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEPLOYMENT="${1:-both}"
+DEPLOYMENT="${1:-external-keycloak}"
 RUN_ID="${UAT_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 REPORT_DIR="${UAT_REPORT_DIR:-${ROOT_DIR}/reports/uat-video-suite/${RUN_ID}}"
 PLAYWRIGHT_DIR="${ROOT_DIR}/tests/e2e/playwright"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:9100}"
 UAT_COMPOSE_BUILD="${UAT_COMPOSE_BUILD:-false}"
-RESTORE_BUNDLED_ON_EXIT=false
+RESTORE_STACK_ON_EXIT=false
 
 cleanup_on_exit() {
   local status=$?
-  if [[ "${RESTORE_BUNDLED_ON_EXIT}" == "true" ]]; then
-    restore_bundled_zitadel || true
+  if [[ "${RESTORE_STACK_ON_EXIT}" == "true" ]]; then
+    restore_compose_stack || true
   fi
   exit "${status}"
 }
@@ -22,7 +22,7 @@ trap cleanup_on_exit EXIT
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/qa/run_uat_video_suite.sh [bundled-zitadel|external-keycloak|both]
+Usage: scripts/qa/run_uat_video_suite.sh [external-keycloak]
 
 Environment:
   UAT_RUN_ID       Optional deterministic run id.
@@ -35,7 +35,7 @@ USAGE
 }
 
 case "${DEPLOYMENT}" in
-  bundled-zitadel|external-keycloak|both) ;;
+  external-keycloak) ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -72,56 +72,31 @@ run_playwright() {
   npx playwright test specs/uat-functional-video.spec.ts --project=chromium --workers=1 --retries=0 --reporter=list
 }
 
-start_bundled_zitadel() {
-  echo "[uat] Starting bundled ZITADEL stack"
-  cd "${ROOT_DIR}"
-  local build_args=()
-  if [[ "${UAT_COMPOSE_BUILD}" == "true" ]]; then
-    build_args=(--build)
-  fi
-  docker compose -f docker-compose.zitadel.yml up -d ${build_args[@]+"${build_args[@]}"}
-  wait_for_http_200 "http://localhost:9180/.well-known/openid-configuration"
-  wait_for_http_200 "http://localhost:8080/health"
-  wait_for_http_200 "http://localhost:8081/health"
-  wait_for_http_200 "http://localhost:8092/health"
-  wait_for_http_200 "${FRONTEND_URL}"
-  bash scripts/init_connector.sh
-  docker compose -f docker-compose.zitadel.yml restart sync-worker
-  wait_for_http_200 "http://localhost:8092/health"
-}
-
 start_external_keycloak() {
-  echo "[uat] Starting external IAM stack with generated local Keycloak"
+  echo "[uat] Starting stack with generated local Keycloak"
   cd "${ROOT_DIR}"
   prepare_keycloak_override
-  docker compose -f docker-compose.zitadel.yml down --remove-orphans
   local build_args=()
   if [[ "${UAT_COMPOSE_BUILD}" == "true" ]]; then
     build_args=(--build)
   fi
-  docker compose -f docker-compose.external-iam.yml -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" up -d ${build_args[@]+"${build_args[@]}"}
+  docker compose --env-file /dev/null -f docker-compose.yml -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" up -d ${build_args[@]+"${build_args[@]}"}
   wait_for_http_200 "http://localhost:9181/realms/artificialflow/.well-known/openid-configuration"
   wait_for_http_200 "http://localhost:8080/health"
   wait_for_http_200 "http://localhost:8081/health"
   wait_for_http_200 "http://localhost:8092/health"
   wait_for_http_200 "${FRONTEND_URL}"
   bash scripts/init_connector.sh
-  docker compose -f docker-compose.external-iam.yml -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" restart sync-worker
+  docker compose --env-file /dev/null -f docker-compose.yml -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" restart sync-worker
   wait_for_http_200 "http://localhost:8092/health"
 }
 
-restore_bundled_zitadel() {
-  echo "[uat] Restoring bundled ZITADEL stack"
+restore_compose_stack() {
+  echo "[uat] Stopping Keycloak overlay"
   cd "${ROOT_DIR}"
   if [[ -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" ]]; then
-    docker compose -f docker-compose.external-iam.yml -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" down --remove-orphans || true
+    docker compose --env-file /dev/null -f docker-compose.yml -f "${REPORT_DIR}/keycloak/docker-compose.keycloak.override.yml" down --remove-orphans || true
   fi
-  docker compose -f docker-compose.zitadel.yml up -d
-  wait_for_http_200 "http://localhost:9180/.well-known/openid-configuration"
-  wait_for_http_200 "http://localhost:8080/health"
-  wait_for_http_200 "http://localhost:8081/health"
-  wait_for_http_200 "http://localhost:8092/health"
-  wait_for_http_200 "${FRONTEND_URL}"
 }
 
 prepare_keycloak_override() {
@@ -133,9 +108,9 @@ prepare_keycloak_override() {
   "displayName": "ArtificialFlow External IAM",
   "roles": {
     "realm": [
-      { "name": "artificialflow admin" },
-      { "name": "artificialflow modeler" },
-      { "name": "artificialflow client" }
+      { "name": "artificialflowadmin" },
+      { "name": "artificialflowbusiness" },
+      { "name": "artificialflowclient" }
     ]
   },
   "clients": [
@@ -160,7 +135,7 @@ prepare_keycloak_override() {
       "enabled": true,
       "emailVerified": true,
       "credentials": [{ "type": "password", "value": "admin", "temporary": false }],
-      "realmRoles": ["artificialflow admin"]
+      "realmRoles": ["artificialflowadmin"]
     },
     {
       "username": "modeler",
@@ -170,7 +145,7 @@ prepare_keycloak_override() {
       "enabled": true,
       "emailVerified": true,
       "credentials": [{ "type": "password", "value": "UatPass123!", "temporary": false }],
-      "realmRoles": ["artificialflow modeler"]
+      "realmRoles": ["artificialflowbusiness"]
     },
     {
       "username": "sdk-client",
@@ -180,7 +155,7 @@ prepare_keycloak_override() {
       "enabled": true,
       "emailVerified": true,
       "credentials": [{ "type": "password", "value": "UatPass123!", "temporary": false }],
-      "realmRoles": ["artificialflow client"]
+      "realmRoles": ["artificialflowclient"]
     },
     {
       "username": "accountant",
@@ -229,7 +204,7 @@ services:
 
   app:
     environment:
-      IAM_DEPLOYMENT_MODE: external
+      IAM_DEPLOYMENT_MODE: "true"
       IAM_PROVIDER_NAME: Keycloak
       AUTH_ISSUER_INTERNAL_URL: http://keycloak:8080/realms/artificialflow
       AUTH_ISSUER_PUBLIC_URL: http://localhost:9181/realms/artificialflow
@@ -246,7 +221,7 @@ services:
 
   workflow-query:
     environment:
-      IAM_DEPLOYMENT_MODE: external
+      IAM_DEPLOYMENT_MODE: "true"
       IAM_PROVIDER_NAME: Keycloak
       AUTH_ISSUER_INTERNAL_URL: http://keycloak:8080/realms/artificialflow
       AUTH_ISSUER_PUBLIC_URL: http://localhost:9181/realms/artificialflow
@@ -262,12 +237,8 @@ services:
         condition: service_started
 
   frontend:
-    build:
-      args:
-        VITE_OIDC_AUTHORITY: http://localhost:9181/realms/artificialflow
-        VITE_OIDC_CLIENT_ID: artificialflow-frontend
     environment:
-      IAM_DEPLOYMENT_MODE: external
+      IAM_DEPLOYMENT_MODE: "true"
       FRONTEND_AUTH_OIDC_AUTHORITY: http://localhost:9181/realms/artificialflow
       FRONTEND_AUTH_OIDC_CLIENT_ID: artificialflow-frontend
     depends_on:
@@ -279,25 +250,12 @@ YAML
 ensure_playwright
 
 case "${DEPLOYMENT}" in
-  bundled-zitadel)
-    start_bundled_zitadel
-    run_playwright bundled-zitadel
-    ;;
   external-keycloak)
-    RESTORE_BUNDLED_ON_EXIT=true
+    RESTORE_STACK_ON_EXIT=true
     start_external_keycloak
     run_playwright external-keycloak
-    restore_bundled_zitadel
-    RESTORE_BUNDLED_ON_EXIT=false
-    ;;
-  both)
-    start_bundled_zitadel
-    run_playwright bundled-zitadel
-    RESTORE_BUNDLED_ON_EXIT=true
-    start_external_keycloak
-    run_playwright external-keycloak
-    restore_bundled_zitadel
-    RESTORE_BUNDLED_ON_EXIT=false
+    restore_compose_stack
+    RESTORE_STACK_ON_EXIT=false
     ;;
 esac
 

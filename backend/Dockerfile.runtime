@@ -1,4 +1,4 @@
-FROM golang:1.25.12-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,9 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 ARG REVISION=unknown
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.revision=${REVISION}" -o workflow-runtime backend/services/workflow-command/cmd/runtime/main.go
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.revision=${REVISION}" -o workflow-runtime backend/services/workflow-command/cmd/runtime/main.go
 
 FROM alpine:3.22
 

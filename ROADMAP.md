@@ -13,7 +13,7 @@ This roadmap communicates the intended direction for the open-source project. It
 
 Ship reliability, upgrade, and honest BPMN coverage before marketing as a self-hosted alternative.
 
-- **1.0 contract**: freeze worker, inbox, SDK, Helm, IAM, and BPMN semantics ([docs/COMPATIBILITY_MATRIX.md](docs/COMPATIBILITY_MATRIX.md), [docs/STABILITY_POLICY.md](docs/STABILITY_POLICY.md)).
+- **1.0 contract**: freeze worker, user-task, SDK, Helm, IAM, and BPMN semantics ([docs/COMPATIBILITY_MATRIX.md](docs/COMPATIBILITY_MATRIX.md), [docs/STABILITY_POLICY.md](docs/STABILITY_POLICY.md)).
 - **HA evidence**: supported replica topology, runtime safety, k6 capacity numbers ([docs/HA_REFERENCE.md](docs/HA_REFERENCE.md)).
 - **Day-2 ops**: upgrade guide, CQRS rebuild, outbox drain, lag SLOs ([docs/UPGRADE.md](docs/UPGRADE.md)).
 - **BPMN honesty**: matrix aligned with runtime; external BPMN import guide ([docs/BPMN_SUPPORT_MATRIX.md](docs/BPMN_SUPPORT_MATRIX.md), [docs/EXTERNAL_BPMN_IMPORT.md](docs/EXTERNAL_BPMN_IMPORT.md)).
@@ -21,11 +21,11 @@ Ship reliability, upgrade, and honest BPMN coverage before marketing as a self-h
 
 ## P1 — Daily experience
 
-- **Browser Task Inbox** on existing `/inbox` APIs.
+- **Analytics** console features for `artificialflowanalytics`.
 - **Instance ops**: failed job retry, stuck-job playbooks, clearer worker vs user-task states.
 - **CQRS productization**: lag indicator, rebuild action, metrics guidance.
-- **Worker DX**: published Go worker library, Node + Go samples; Python worker after Go is solid.
-- **IAM recipes**: Keycloak, Entra ID, Auth0; harden bundled ZITADEL bootstrap constraints.
+- **Worker DX**: Node.js, .NET, and Java SDKs and Python and Go worker clients ship today; next are lock renewal for the Python worker and published Python packages.
+- **IAM recipes**: Keycloak, Entra ID, Auth0, Okta for the external OIDC integration.
 
 ## P2 — Selective engine parity
 

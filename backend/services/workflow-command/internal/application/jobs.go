@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	pb "github.com/artificialflow/artificialflow/backend/api/v1/go"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
@@ -69,7 +70,7 @@ func (e *Engine) activateJobsOnce(ctx context.Context, jobType, worker string, m
 		activated = make([]model.Job, 0, len(jobs))
 		for _, job := range jobs {
 			lockUntil := now.Add(lockDuration)
-			job.State = "ACTIVATED"
+			job.State = model.JobStateActivated
 			job.Worker = worker
 			job.LockExpirationTime = &lockUntil
 			job.UpdatedAt = now
@@ -108,10 +109,10 @@ func (e *Engine) CompleteJob(ctx context.Context, jobKey int64, worker string, v
 			return err
 		}
 
-		if job.State == "COMPLETED" {
+		if job.State == model.JobStateCompleted {
 			return nil
 		}
-		if job.State != "ACTIVATED" {
+		if job.State != model.JobStateActivated {
 			return fmt.Errorf("job %d is not activated", job.Key)
 		}
 
@@ -137,10 +138,15 @@ func (e *Engine) CompleteJob(ctx context.Context, jobKey int64, worker string, v
 			}
 		}
 
-		job.State = "COMPLETED"
+		job.State = model.JobStateCompleted
 		job.LockExpirationTime = nil
 		job.UpdatedAt = now
 		if err := txEngine.repo.UpdateJob(ctx, job); err != nil {
+			return err
+		}
+
+		serializedVariables, err := serializeJobVariables(variables)
+		if err != nil {
 			return err
 		}
 
@@ -148,7 +154,7 @@ func (e *Engine) CompleteJob(ctx context.Context, jobKey int64, worker string, v
 		if err := txEngine.eventPublisher.Publish(ctx, &pb.JobCompleted{
 			Key:       job.Key,
 			Worker:    worker,
-			Variables: "", // TODO: Serialize variables if needed
+			Variables: serializedVariables,
 			UpdatedAt: timestamppb.New(now),
 		}, "JobCompleted"); err != nil {
 			fmt.Printf("failed to publish JobCompleted: %v\n", err)
@@ -159,6 +165,17 @@ func (e *Engine) CompleteJob(ctx context.Context, jobKey int64, worker string, v
 	})
 }
 
+func serializeJobVariables(variables map[string]any) (string, error) {
+	if len(variables) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(variables)
+	if err != nil {
+		return "", fmt.Errorf("serialize completed job variables: %w", err)
+	}
+	return string(data), nil
+}
+
 func (e *Engine) FailJob(ctx context.Context, jobKey int64, worker, errorMessage string, retries *int) error {
 	return e.withTx(ctx, func(txEngine *Engine) error {
 		job, err := txEngine.repo.GetJob(ctx, jobKey)
@@ -166,15 +183,15 @@ func (e *Engine) FailJob(ctx context.Context, jobKey int64, worker, errorMessage
 			return err
 		}
 
-		if job.State == "COMPLETED" {
+		if job.State == model.JobStateCompleted {
 			return fmt.Errorf("job %d already completed", job.Key)
 		}
-		if job.State == "FAILED" {
+		if job.State == model.JobStateFailed {
 			return nil
 		}
 
 		now := time.Now()
-		if job.State == "ACTIVATED" {
+		if job.State == model.JobStateActivated {
 			if err := ensureActiveLockOwnership(job, worker, now); err != nil {
 				return err
 			}
@@ -194,11 +211,11 @@ func (e *Engine) FailJob(ctx context.Context, jobKey int64, worker, errorMessage
 		job.UpdatedAt = now
 
 		if remainingRetries > 0 {
-			job.State = "CREATED"
+			job.State = model.JobStateCreated
 			return txEngine.repo.UpdateJob(ctx, job)
 		}
 
-		job.State = "FAILED"
+		job.State = model.JobStateFailed
 		if err := txEngine.repo.UpdateJob(ctx, job); err != nil {
 			return err
 		}
@@ -222,9 +239,9 @@ func (e *Engine) FailJob(ctx context.Context, jobKey int64, worker, errorMessage
 			ProcessInstanceKey: job.ProcessInstanceKey,
 			ElementInstanceKey: job.ElementInstanceKey,
 			JobKey:             job.Key,
-			ErrorType:          "JOB_NO_RETRIES",
+			ErrorType:          model.IncidentErrorJobNoRetries,
 			ErrorMessage:       errorMessage,
-			State:              "CREATED",
+			State:              model.IncidentStateCreated,
 			CreatedAt:          time.Now(),
 		}
 		return txEngine.repo.CreateIncident(ctx, incident)
@@ -241,7 +258,7 @@ func (e *Engine) ExtendJobLock(ctx context.Context, jobKey int64, worker string,
 		if err != nil {
 			return err
 		}
-		if job.State != "ACTIVATED" {
+		if job.State != model.JobStateActivated {
 			return fmt.Errorf("job %d is not activated", job.Key)
 		}
 
@@ -270,6 +287,46 @@ func (e *Engine) ListIncidents(ctx context.Context, processInstanceKey int64, li
 	return e.repo.ListIncidents(ctx, processInstanceKey, limit)
 }
 
+// ResolveIncident marks an incident resolved. Repeated resolution is idempotent.
+func (e *Engine) ResolveIncident(ctx context.Context, incidentKey int64) (*model.Incident, error) {
+	var resolved *model.Incident
+	err := e.withTx(ctx, func(txEngine *Engine) error {
+		var incident *model.Incident
+		var err error
+		if getter, ok := txEngine.repo.(interface {
+			GetIncident(context.Context, int64) (*model.Incident, error)
+		}); ok {
+			incident, err = getter.GetIncident(ctx, incidentKey)
+		} else {
+			var incidents []model.Incident
+			incidents, err = txEngine.repo.ListIncidents(ctx, 0, 100000)
+			for index := range incidents {
+				if incidents[index].Key == incidentKey {
+					copy := incidents[index]
+					incident = &copy
+					break
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if incident == nil {
+			return fmt.Errorf("incident %d not found", incidentKey)
+		}
+		if incident.State != model.IncidentStateResolved {
+			incident.State = model.IncidentStateResolved
+			incident.ResolvedAt = time.Now()
+			if err := txEngine.repo.UpdateIncident(ctx, incident); err != nil {
+				return err
+			}
+		}
+		resolved = incident
+		return nil
+	})
+	return resolved, err
+}
+
 // RetryJob resets a failed or unlocked job so workers can pick it up again (ops/admin).
 func (e *Engine) RetryJob(ctx context.Context, jobKey int64, retries int) error {
 	if retries <= 0 {
@@ -280,14 +337,14 @@ func (e *Engine) RetryJob(ctx context.Context, jobKey int64, retries int) error 
 		if err != nil {
 			return err
 		}
-		if job.State == "COMPLETED" {
+		if job.State == model.JobStateCompleted {
 			return fmt.Errorf("job %d already completed", job.Key)
 		}
 		now := time.Now()
-		if job.State == "ACTIVATED" && job.LockExpirationTime != nil && job.LockExpirationTime.After(now) {
+		if job.State == model.JobStateActivated && job.LockExpirationTime != nil && job.LockExpirationTime.After(now) {
 			return fmt.Errorf("job %d is locked by worker %s until %s", job.Key, job.Worker, job.LockExpirationTime.Format(time.RFC3339))
 		}
-		job.State = "CREATED"
+		job.State = model.JobStateCreated
 		job.Retries = retries
 		job.Worker = ""
 		job.LockExpirationTime = nil
@@ -316,7 +373,7 @@ func (e *Engine) ClaimUserTask(ctx context.Context, instanceID, executionID, own
 		if err != nil {
 			return err
 		}
-		if job.State == "COMPLETED" {
+		if job.State == model.JobStateCompleted {
 			return fmt.Errorf("user task %s is already completed", executionID)
 		}
 		if job.Worker != "" && job.Worker != owner && !force {
@@ -325,7 +382,7 @@ func (e *Engine) ClaimUserTask(ctx context.Context, instanceID, executionID, own
 
 		now := time.Now()
 		job.Worker = owner
-		job.State = "ACTIVATED"
+		job.State = model.JobStateActivated
 		job.UpdatedAt = now
 		if err := txEngine.repo.UpdateJob(ctx, job); err != nil {
 			return err
@@ -348,7 +405,7 @@ func (e *Engine) CompleteUserTask(ctx context.Context, instanceID, executionID, 
 		if err != nil {
 			return err
 		}
-		if job.State == "COMPLETED" {
+		if job.State == model.JobStateCompleted {
 			return nil
 		}
 		if !force {
@@ -361,7 +418,7 @@ func (e *Engine) CompleteUserTask(ctx context.Context, instanceID, executionID, 
 		}
 
 		now := time.Now()
-		job.State = "COMPLETED"
+		job.State = model.JobStateCompleted
 		job.LockExpirationTime = nil
 		job.UpdatedAt = now
 		if err := txEngine.repo.UpdateJob(ctx, job); err != nil {

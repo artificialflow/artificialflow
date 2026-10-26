@@ -79,7 +79,7 @@ func ToJobResponse(j model.Job) JobResponse {
 		ElementID:            j.ElementID,
 		Worker:               j.Worker,
 		Retries:              j.Retries,
-		State:                j.State,
+		State:                string(j.State),
 		Assignee:             j.Assignee,
 		CandidateUsers:       j.CandidateUsers,
 		CandidateGroups:      j.CandidateGroups,
@@ -98,24 +98,27 @@ func ToJobResponses(jobs []model.Job) []JobResponse {
 	return responses
 }
 
-func ToUserTaskResponse(j model.Job, eligible, ownsClaim, admin bool) UserTaskResponse {
+// ToUserTaskResponse reports task facts only. Whether a particular end user
+// may act on the task is decided by the client application.
+func ToUserTaskResponse(j model.Job) UserTaskResponse {
 	claimed := strings.TrimSpace(j.Worker)
-	canClaim := eligible && j.State != "COMPLETED" && (claimed == "" || admin)
-	canComplete := j.State != "COMPLETED" && (admin || (eligible && ownsClaim))
+	open := j.State != model.JobStateCompleted
 	return UserTaskResponse{
-		Key:             fmt.Sprintf("%d", j.Key),
-		ElementID:       j.ElementID,
-		ExecutionID:     fmt.Sprintf("%d", j.ElementInstanceKey),
-		State:           j.State,
-		Assignee:        j.Assignee,
-		CandidateUsers:  splitAssignmentList(j.CandidateUsers),
-		CandidateGroups: splitAssignmentList(j.CandidateGroups),
-		ClaimedBy:       claimed,
-		CanClaim:        canClaim,
-		CanComplete:     canComplete,
-		DueDate:         j.DueDate,
-		CreatedAt:       j.CreatedAt,
-		UpdatedAt:       j.UpdatedAt,
+		Key:                  fmt.Sprintf("%d", j.Key),
+		ProcessInstanceKey:   fmt.Sprintf("%d", j.ProcessInstanceKey),
+		ProcessDefinitionKey: fmt.Sprintf("%d", j.ProcessDefinitionKey),
+		ElementID:            j.ElementID,
+		ExecutionID:          fmt.Sprintf("%d", j.ElementInstanceKey),
+		State:                string(j.State),
+		Assignee:             j.Assignee,
+		CandidateUsers:       splitAssignmentList(j.CandidateUsers),
+		CandidateGroups:      splitAssignmentList(j.CandidateGroups),
+		ClaimedBy:            claimed,
+		CanClaim:             open && claimed == "",
+		CanComplete:          open && claimed != "",
+		DueDate:              j.DueDate,
+		CreatedAt:            j.CreatedAt,
+		UpdatedAt:            j.UpdatedAt,
 	}
 }
 

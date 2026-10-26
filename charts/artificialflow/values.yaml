@@ -1,377 +1,214 @@
-global:
-  imagePullSecrets: []
-  podAnnotations: {}
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-
-nameOverride: ""
-fullnameOverride: ""
-
-# Use only when upgrading the former chart in place. These values keep
-# every resource name and immutable workload selector equal to the live release.
-# Fresh installs must leave this disabled.
-compatibility:
-  legacyResourceNames:
-    enabled: false
-    fullnameOverride: ""
-    selectorNameOverride: ""
-    selectorInstanceOverride: ""
-  # Used only with bundled ZITADEL during an in-place legacy-resource upgrade.
-  # External IAM continues to use the operator-supplied live issuer values.
-  legacyBundledIAM:
-    issuerInternalUrl: ""
-    issuerPublicUrl: ""
-    frontendAuthority: ""
-    frontendClientIdFile: ""
-
-replicaCount:
-  command: 2
-  query: 2
-  runtime: 1
-  syncWorker: 1
-  frontend: 2
-  gateway: 2
-
-# PDBs apply only when the component has replicas >= 2.
-podDisruptionBudget:
-  enabled: true
-  command:
-    minAvailable: 1
-  query:
-    minAvailable: 1
-  frontend:
-    minAvailable: 1
-  gateway:
-    minAvailable: 1
-
-# Optional HPA. Keep disabled by default; enable per component in production values.
-# Do not autoscaling the runtime scheduler (single-active lease).
-autoscaling:
-  enabled: false
-  command:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 6
-    targetCPUUtilizationPercentage: 70
-  query:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 6
-    targetCPUUtilizationPercentage: 70
-  frontend:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 6
-    targetCPUUtilizationPercentage: 70
-  gateway:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 6
-    targetCPUUtilizationPercentage: 70
-
-images:
-  command:
-    repository: artificialflow/workflow-command
-    tag: "1.1.0"
-    pullPolicy: IfNotPresent
-  query:
-    repository: artificialflow/workflow-query
-    tag: "1.1.0"
-    pullPolicy: IfNotPresent
-  runtime:
-    repository: artificialflow/workflow-runtime
-    tag: "1.1.0"
-    pullPolicy: IfNotPresent
-  syncWorker:
-    repository: artificialflow/sync-worker
-    tag: "1.1.0"
-    pullPolicy: IfNotPresent
-  frontend:
-    repository: artificialflow/frontend
-    tag: "1.1.0"
-    pullPolicy: IfNotPresent
-  gateway:
-    repository: nginx
-    tag: "1.27-alpine"
-    pullPolicy: IfNotPresent
-
-serviceAccount:
-  create: true
-  name: ""
-  annotations: {}
-
-applicationState:
-  rootPath: /artificialflow
-  filePrefix: artificialflow
-  apiCredentialUID: "10001"
-  bootstrapExistingClaim: ""
-  authExistingClaim: ""
-
-# Fresh installs use canonical persistent identifiers. Existing installations can
-# keep legacy identifiers by explicitly overriding these values during cutover.
-postgresql:
-  dsn: ""
-  host: "postgres.example.internal"
-  port: 5432
-  database: workflow_db
-  user: artificialflow
-  password: "change-me"
-  sslMode: require
-  existingSecret: ""
-  existingSecretKey: PG_DSN
-
-search:
-  backend: elasticsearch
-  address: "https://elasticsearch.example.internal:9200"
-  indexPrefix: artificialflow
-
-eventBus:
-  type: kafka
-  kafka:
-    brokers: "kafka.example.internal:9092"
-    eventTopic: workflow.events.v1
-  nats:
-    url: "nats://nats.example.internal:4222"
-
-cors:
-  allowedOrigins: "https://app.artificialflow.example.io"
-  allowCredentials: false
+# ArtificialFlow: one chart, external OIDC, Kafka + Debezium CDC.
+# Defaults bundle Postgres, Elasticsearch, Kafka, and Debezium Connect.
+# A typical install only sets `iam.auth.*`, `ingress.host`, and `cors`.
 
 iam:
-  mode: external
-  providerName: "External OIDC Provider"
+  # true: external OIDC provider (iam.auth below is required).
+  # false: no provider; local console sign-in (iam.consoleAdmin), API open.
+  mode: true
+  providerName: External OIDC Provider
   auth:
-    issuerInternalUrl: "https://login.example.com"
-    issuerPublicUrl: "https://login.example.com"
-    clientId: workflow-backend
-    tokenMode: jwt
+    issuerInternalUrl: https://login.example.com # as reached from pods
+    issuerPublicUrl: https://login.example.com # token `iss`, as seen by browsers
+    clientId: workflow-backend # expected audience
+    claimRolesPath: roles,realm_access.roles,groups
+    tokenMode: jwt # jwt | introspection
     introspectionUrl: ""
     introspectionClientId: ""
     introspectionClientSecret: ""
-    introspectionAuthMethod: basic
-    claimSubjectPath: sub
-    claimRolesPath: roles,realm_access.roles,groups
-    claimScopesPath: scope,scp
-    claimTenantPath: tenant_id
-    claimEmailPath: email
-    claimNamePath: name
-    enforceAudience: true
-    allowInsecureIssuer: false
+    production: true # applies only when mode is true
   frontend:
-    oidcAuthority: "https://login.example.com"
+    oidcAuthority: "" # defaults to iam.auth.issuerPublicUrl
     oidcClientId: workflow-frontend
-    oidcClientIdFile: ""
-
-command:
-  service:
-    type: ClusterIP
-    port: 8080
-  env:
-    serverAddr: 0.0.0.0:8080
-    runtimeEnabled: "false"
-    outboxRelayEnabled: "true"
-    outboxRelayInterval: 1s
-    outboxRelayTimeout: 5s
-    outboxRelayBatchSize: "200"
-    outboxRelayMaxAttempts: "10"
-    idempotencyCleanupEnabled: "true"
-    idempotencyRetention: 168h
-    idempotencyCleanupInterval: 1h
-    idempotencyCleanupTimeout: 10s
-    idempotencyCleanupBatchSize: "500"
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 1000m
-      memory: 512Mi
-
-query:
-  service:
-    type: ClusterIP
-    port: 8081
-  env:
-    serverAddr: 0.0.0.0:8081
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 1000m
-      memory: 512Mi
-
-runtime:
-  enabled: true
-  env:
-    runtimeEnabled: "true"
-    tickInterval: 1s
-    taskTimeout: 5s
-    leaseTTL: 15s
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 1000m
-      memory: 512Mi
-
-syncWorker:
-  enabled: true
-  service:
-    type: ClusterIP
-    port: 8092
-  env:
-    groupId: artificialflow-sync-worker
-    topics: workflow.events.v1,artificialflow.public.process,artificialflow.public.process_instance,artificialflow.public.element_instance,artificialflow.public.variable,artificialflow.public.job,artificialflow.public.incident,artificialflow.public.timer,artificialflow.public.message_subscription
-    projectionContract: hybrid
-    dlqTopic: workflow.sync.dlq
-    connectBootstrapEnabled: "true"
-    connectUrl: "http://debezium-connect.example.internal:8083"
-    connectorName: artificialflow-postgres-connector
-    connectorTopicPrefix: artificialflow
-    connectorSlotName: artificialflow_slot
-    connectorDatabaseUser: artificialflow
-    connectorFile: ""
-    connectorJson: ""
-    allowParallelConnectors: "false"
-    connectWaitTimeoutSec: "180"
-    maxProcessRetries: "3"
-    retryBackoff: 500ms
-    metricsAddr: ":8092"
-    freshnessSloSec: "120"
-    healthFailOnStale: "false"
-    allowMixedDebeziumPrefixes: "false"
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 1000m
-      memory: 512Mi
-
-frontend:
-  service:
-    type: ClusterIP
-    port: 80
-  env:
-    apiUrl: /api
-    oidcClientIdFileTimeoutSeconds: "240"
-  resources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-
-gateway:
-  enabled: true
-  service:
-    type: ClusterIP
-    port: 80
-  resources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
+  # Console sign-in, rendered only when mode is false. Does not protect the API.
+  # With postgresql.existingSecret, put CONSOLE_ADMIN_PASSWORD in that Secret.
+  consoleAdmin:
+    username: admin
+    password: admin
 
 ingress:
   enabled: true
   className: nginx
   annotations: {}
   host: app.artificialflow.example.io
-  tls:
-    enabled: true
-    secretName: artificialflow-tls
+  tls: {enabled: true, secretName: artificialflow-tls}
 
-zitadel:
-  enabled: false
-  publicUrl: "https://iam.artificialflow.example.io"
-  externalDomain: iam.artificialflow.example.io
-  externalPort: 443
-  externalSecure: true
-  masterkey: MasterkeyNeedsToHave32Characters
-  existingSecret: ""
-  bootstrap:
-    waitSeconds: "240"
-    accessTokenLifetime: 900s
-    ownerPatExpiration: "2099-01-01T00:00:00Z"
-    loginPatExpiration: "2099-01-01T00:00:00Z"
-    clientKeyDefaultLifetime: 2160h
-    clientKeyMaxLifetime: 8760h
-    enableLegacyPatCreation: false
-    enableLegacyPatRotation: false
-    projectName: ArtificialFlow
-    frontendAppName: ArtificialFlow Frontend
-    frontendUrl: "https://app.artificialflow.example.io"
-    adminUsername: admin
-    adminPassword: "change-me"
-    adminGivenName: admin
-    adminFamilyName: admin
-    adminDisplayName: admin
-    adminEmail: admin@example.com
-    adminLoginName: admin
-  api:
-    machineKeySize: 2048
-    applicationKeySize: 2048
-    image:
-      repository: ghcr.io/zitadel/zitadel
-      tag: v4.13.0
-      pullPolicy: IfNotPresent
-    replicas: 1
-    resources:
-      requests:
-        cpu: 250m
-        memory: 512Mi
-      limits:
-        cpu: 2000m
-        memory: 2Gi
-  login:
-    image:
-      repository: ghcr.io/zitadel/zitadel-login
-      tag: v4.13.0
-      pullPolicy: IfNotPresent
-    replicas: 1
-    resources:
-      requests:
-        cpu: 100m
-        memory: 256Mi
-      limits:
-        cpu: 1000m
-        memory: 1Gi
-  postgresql:
+cors:
+  allowedOrigins: https://app.artificialflow.example.io # exact comma-separated allowlist
+  allowCredentials: false
+
+# Extra environment for every ArtificialFlow service (for example
+# TENANT_MODE, AUTH_ENFORCE_AUDIENCE, LOG_LEVEL, CONNECTOR_JSON).
+# Unset keys keep the service defaults listed in docs/deployment.md.
+env: {}
+
+# Each image also accepts `digest: sha256:...` and `pullPolicy`.
+images:
+  command:
+    repository: artificialflow/workflow-command
+    tag: "1.2.0"
+  query:
+    repository: artificialflow/workflow-query
+    tag: "1.2.0"
+  runtime:
+    repository: artificialflow/workflow-runtime
+    tag: "1.2.0"
+  syncWorker:
+    repository: artificialflow/sync-worker
+    tag: "1.2.0"
+  frontend:
+    repository: artificialflow/frontend
+    tag: "1.2.0"
+  gateway:
+    repository: nginxinc/nginx-unprivileged
+    tag: "1.27-alpine"
+
+replicaCount: {command: 2, query: 2, runtime: 1, syncWorker: 1, frontend: 2, gateway: 2}
+
+# Per-component `env` maps are added to that container only.
+command:
+  env: {}
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 1000m, memory: 512Mi}}
+query:
+  env: {}
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 1000m, memory: 512Mi}}
+runtime:
+  enabled: true
+  schedulerMode: compat # multi-active with replicaCount.runtime=3 for HA
+  env: {}
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 1000m, memory: 512Mi}}
+syncWorker:
+  enabled: true
+  env: {}
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 1000m, memory: 512Mi}}
+frontend:
+  resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+gateway:
+  enabled: true
+  serviceType: ClusterIP
+  # HSTS requires TLS at the ingress (ingress.enabled and ingress.tls.enabled).
+  hsts: {enabled: true, maxAge: 31536000}
+  resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+
+# --- Data plane: bundled by default; set bundled.enabled=false to use managed services ---
+postgresql:
+  bundled:
     enabled: true
-    image:
-      repository: postgres
-      tag: 17.2-alpine
-      pullPolicy: IfNotPresent
-    database: zitadel
-    user: postgres
-    password: "change-me"
-    storageClassName: ""
+    image: {repository: postgres, tag: 15-alpine}
     size: 20Gi
-    resources:
-      requests:
-        cpu: 100m
-        memory: 256Mi
-      limits:
-        cpu: 1000m
-        memory: 1Gi
-  bootstrapStorage:
-    existingClaim: ""
     storageClassName: ""
-    accessModes:
-      - ReadWriteMany
-    size: 1Gi
-  ingress:
+    resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1Gi}}
+  host: "" # required when not bundled (or set dsn)
+  port: 5432
+  database: workflow_db
+  user: artificialflow
+  password: change-me
+  sslMode: require # bundled always uses disable
+  dsn: ""
+  # Secret with PG_DSN (and POSTGRES_PASSWORD / AUTH_INTROSPECTION_CLIENT_SECRET when used).
+  existingSecret: ""
+  existingSecretKey: PG_DSN
+
+search:
+  bundled:
     enabled: true
-    className: nginx
-    annotations: {}
-    host: iam.artificialflow.example.io
-    tls:
-      enabled: true
-      secretName: artificialflow-iam-tls
+    image: {repository: docker.elastic.co/elasticsearch/elasticsearch, tag: "8.11.1"}
+    javaOpts: -Xms512m -Xmx512m
+    size: 20Gi
+    storageClassName: ""
+    resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: 2000m, memory: 2Gi}}
+  address: "" # required when not bundled
+
+kafka:
+  # Partitions for topics created by sync-worker or auto-created by the bundled broker.
+  # Sync-worker replicas beyond this count sit idle; existing topics are not resized.
+  topicPartitions: 3
+  bundled:
+    enabled: true
+    image: {repository: confluentinc/cp-kafka, tag: "7.6.1"}
+    size: 20Gi
+    storageClassName: ""
+    resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: 2000m, memory: 2Gi}}
+  brokers: "" # required when not bundled
+
+connect:
+  bundled:
+    enabled: true
+    image: {repository: debezium/connect, tag: "2.6"}
+    resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: 2000m, memory: 2Gi}}
+  url: "" # required when not bundled
+
+# Command and runtime apply the embedded schema migrations at startup under a
+# Postgres advisory lock; the chart has no separate migration Job.
+startupProbe:
+  # Window for migrations before liveness checks begin: periodSeconds x failureThreshold.
+  periodSeconds: 5
+  failureThreshold: 120
+
+# --- Production hardening ---
+# PDBs apply only to components running at least 2 replicas.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: {command: 1, query: 1, runtime: 2, frontend: 1, gateway: 1}
+
+autoscaling:
+  enabled: false
+  components: [command, query, frontend, gateway]
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Default-deny policies. Endpoints outside the namespace need explicit CIDRs.
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx
+  external:
+    postgresqlCIDRs: []
+    brokerCIDRs: []
+    searchCIDRs: []
+    iamCIDRs: []
+    telemetryCIDRs: []
+
+# Opt-in Prometheus Operator + Grafana resources. Metrics stay cluster-private.
+monitoring:
+  enabled: false
+  serviceMonitor: {enabled: true, interval: 30s, scrapeTimeout: 10s, additionalLabels: {}}
+  prometheusRule:
+    enabled: true
+    additionalLabels: {}
+    runbookBaseUrl: https://github.com/artificialflow/artificialflow/blob/main/docs/operations.md
+  grafanaDashboard: {enabled: true, label: grafana_dashboard, labelValue: "1"}
+
+# --- Kubernetes plumbing ---
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+global:
+  imagePullSecrets: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: {drop: [ALL]}
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Only for in-place upgrades of the former chart; fresh installs keep this disabled.
+compatibility:
+  legacyResourceNames:
+    enabled: false
+    fullnameOverride: ""
+    selectorNameOverride: ""
+    selectorInstanceOverride: ""

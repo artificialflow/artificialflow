@@ -1,12 +1,25 @@
 package messaging
 
 import (
+	"context"
 	workflowapi "github.com/artificialflow/artificialflow/backend/api/v1/go"
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
+
+func TestNewEventEnvelopeUsesContextTenant(t *testing.T) {
+	ctx := auth.WithPrincipal(context.Background(), auth.Principal{TenantID: "tenant-a"})
+	envelope := newEventEnvelope(ctx, &workflowapi.JobActivated{Key: 42}, "JobActivated")
+	if envelope.TenantID != "tenant-a" {
+		t.Fatalf("tenant = %q, want tenant-a", envelope.TenantID)
+	}
+	if envelope.AggregateType != "job" || envelope.AggregateID != "42" || envelope.EventID == "" {
+		t.Fatalf("unexpected envelope identity: %#v", envelope)
+	}
+}
 
 func TestAggregateIDForEvent(t *testing.T) {
 	tests := []struct {

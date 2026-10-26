@@ -62,14 +62,12 @@ risk_surfaces:
   deployment:
     paths:
       - docker-compose.yml
-      - docker-compose.external-iam.yml
-      - docker-compose.zitadel.yml
-      - docker-compose.release.yml
+      - .env.example
       - charts/
       - scripts/validate_helm.sh
     checks:
-      - make smoke-profiles
-      - make smoke-release-profiles
+      - make smoke
+      - make smoke-release
       - make validate-helm
   security:
     paths:
@@ -96,7 +94,7 @@ quality_commands:
   required_pr:
     - make test-unit
     - make test-frontend
-    - make smoke-profiles
+    - make smoke
     - make validate-helm
   deep:
     - make test-integration
@@ -106,7 +104,7 @@ quality_commands:
     - make test-perf
     - make test-all
   release:
-    - make smoke-release-profiles
+    - make smoke-release
     - make release-dry-run
   security:
     - make test-security

@@ -37,7 +37,7 @@ Redirects use a custom `CheckRedirect` that re-validates the allowlist host. Emp
 
 ```bash
 export ARTIFICIALFLOW_BASE_URL=http://localhost:9100/api
-export ARTIFICIALFLOW_TOKEN=...
+export ARTIFICIALFLOW_TOKEN=...   # only with IAM_DEPLOYMENT_MODE=true
 export HTTP_CONNECTOR_ALLOWED_HOSTS=api.example.com
 go run ./connectors/http
 

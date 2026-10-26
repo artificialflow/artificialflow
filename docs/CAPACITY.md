@@ -48,9 +48,9 @@ PY
 
 Environment:
 
-- `ARTIFICIALFLOW_IMAGE_TAG=v0.3.0` via `make up-zitadel-release`
+- `ARTIFICIALFLOW_IMAGE_TAG=v0.3.0` via `make up-release`
 - Host: macOS Docker Desktop (single-node Compose; not a production HA cluster)
-- Auth: short-lived ZITADEL JWT Profile token (`scripts/mint_bakeoff_token.mjs`)
+- Auth: short-lived OIDC access token (mint with `scripts/mint_bakeoff_token.mjs`, OAuth2 client_credentials)
 - k6: `make test-perf` (~2 min; thresholds `http_req_duration p95<2000`, `http_req_failed<5%` — both passed)
 
 | Metric | Environment | p50 | p95 | p99 | Notes |

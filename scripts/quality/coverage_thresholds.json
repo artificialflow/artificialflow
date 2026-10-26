@@ -1,0 +1,15 @@
+{
+  "aggregate_min": 37.5,
+  "packages": {
+    "backend/libs/auth": 65.3,
+    "backend/services/workflow-command/internal/application": 20.0,
+    "backend/services/workflow-command/internal/domain/bpmn": 78.0,
+    "backend/services/workflow-command/internal/infrastructure/persistence": 45.0,
+    "backend/services/workflow-command/internal/interfaces/http": 60.0,
+    "backend/services/sync-worker/internal/application": 21.5,
+    "connectors/internal/common": 56.5
+  },
+  "excluded_prefixes": [
+    "github.com/artificialflow/artificialflow/backend/api/v1/go/"
+  ]
+}

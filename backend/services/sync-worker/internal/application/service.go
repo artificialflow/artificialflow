@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pb "github.com/artificialflow/artificialflow/backend/api/v1/go"
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/logger"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/domain/model"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/domain/repository"
@@ -74,6 +75,9 @@ func (s *SyncService) ProcessMessage(ctx context.Context, topic string, msg mode
 				"topic": topic,
 			})
 			return fmt.Errorf("failed to extract id/doc: %v", err)
+		}
+		if strings.HasSuffix(index, "variable") {
+			normalizeVariableValue(doc)
 		}
 
 		if err := s.repo.Upsert(ctx, index, id, doc); err != nil {
@@ -142,6 +146,18 @@ func (s *SyncService) ProcessMessage(ctx context.Context, topic string, msg mode
 	}
 
 	return nil
+}
+
+func normalizeVariableValue(doc map[string]any) {
+	value, ok := doc["value"]
+	if !ok {
+		return
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	doc["value"] = string(encoded)
 }
 
 func (s *SyncService) denormalizeVariable(ctx context.Context, msg model.DebeziumMessage) error {
@@ -299,14 +315,37 @@ func extractIDAndDoc(raw json.RawMessage) (string, map[string]any, error) {
 	return "", doc, fmt.Errorf("unable to determine document id (expected key or scope_key)")
 }
 
+// ProcessEvent plans projection writes for an event and applies them sequentially.
+// Kafka and single-message callers keep the previous per-op write semantics.
 func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data []byte) error {
 	start := time.Now()
+	ops, err := s.PlanEvent(ctx, eventType, data)
+	if err != nil {
+		return err
+	}
+	for _, op := range ops {
+		if err := s.applyWriteOp(ctx, op); err != nil {
+			return err
+		}
+	}
+
+	s.log.Debug(ctx, "processed event", map[string]any{
+		"type":        eventType,
+		"duration_ms": time.Since(start).Milliseconds(),
+	})
+
+	return nil
+}
+
+// PlanEvent maps an event payload to ordered Elasticsearch write operations without I/O.
+func (s *SyncService) PlanEvent(ctx context.Context, eventType string, data []byte) ([]repository.WriteOp, error) {
+	tenantID := auth.TenantIDFromContext(ctx)
 
 	switch eventType {
 	case "ProcessInstanceCreated":
 		var event pb.ProcessInstanceCreated
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal ProcessInstanceCreated: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal ProcessInstanceCreated: %w", err)
 		}
 
 		doc := map[string]any{
@@ -317,57 +356,45 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"bpmn_process_id":        event.BpmnProcessId,
 			"state":                  "ACTIVE",
 			"created_at":             event.CreatedAt.AsTime(),
+			"tenant_id":              tenantID,
 		}
 
 		index := s.indexNameForTopic("process_instance")
-		if err := s.repo.Upsert(ctx, index, fmt.Sprintf("%d", event.Key), doc); err != nil {
-			return err
-		}
+		script := "for (def entry : params.entrySet()) { if (entry.getKey() != 'state') { ctx._source[entry.getKey()] = entry.getValue(); } } if (ctx._source.state == null || ctx._source.state == 'ACTIVE') { ctx._source.state = params.state; }"
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: doc, Upsert: doc,
+		}}, nil
 
 	case "ProcessInstanceCompleted":
 		var event pb.ProcessInstanceCompleted
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal ProcessInstanceCompleted: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal ProcessInstanceCompleted: %w", err)
 		}
 
-		// Partial update? Repo.Upsert overwrites.
-		// Use UpdateWithScript or Repo.Update?
-		// Repo interface: Upsert(ctx, index, id, doc) - implies overwrite or merge?
-		// ES Upsert usually merges if using "doc_as_upsert"?
-		// Current Upsert implementation in es_repository.go calls `client.Index`. This OVERWRITES.
-		// I need a partial update method or read-modify-write.
-		// Or assume Debezium/Events provide FULL state?
-		// Events only provide partial change.
-		// I should use `Update` (which uses `client.Update`).
-		// I'll check `es_repository.go` later, assume `Update` exists or `Upsert` handles it?
-		// Wait, `process_instance` created has full state. Completed has only end time.
-		// If I overwrite with only end time, I lose other fields!
-		// I need partial update.
-		// `ProcessInstanceCompleted` event should ideally contain full state or I use `repo.Update`.
-		// Repo has `UpdateWithScript`. Does it have `Update` (partial)?
-
 		index := s.indexNameForTopic("process_instance")
-		// Use script update for simple field updates
 		script := "ctx._source.state = params.state; ctx._source.end_time = params.end_time;"
 		params := map[string]any{
 			"state":    "COMPLETED",
 			"end_time": event.EndTime.AsTime(),
 		}
-		if err := s.repo.UpdateWithScript(ctx, index, fmt.Sprintf("%d", event.Key), script, params); err != nil {
-			return err
+		upsert := map[string]any{
+			"key": event.Key, "state": "COMPLETED", "end_time": event.EndTime.AsTime(), "tenant_id": tenantID,
 		}
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: params, Upsert: upsert,
+		}}, nil
 
 	case "VariableUpdated":
 		var event pb.VariableUpdated
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal VariableUpdated: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal VariableUpdated: %w", err)
 		}
 
-		// Generate Deterministic Key
 		keyStr := fmt.Sprintf("%d_%s", event.ProcessInstanceKey, event.Name)
 		key := generateDeterministicKey(keyStr)
 
-		// 1. Index Variable Document
 		varDoc := map[string]any{
 			"key":                  key,
 			"name":                 event.Name,
@@ -375,16 +402,12 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"process_instance_key": event.ProcessInstanceKey,
 			"scope_key":            event.ScopeKey,
 			"updated_at":           event.UpdatedAt.AsTime(),
+			"tenant_id":            tenantID,
 		}
 		indexVar := s.indexNameForTopic("variable")
-		if err := s.repo.Upsert(ctx, indexVar, fmt.Sprintf("%d", key), varDoc); err != nil {
-			return err
-		}
 
-		// 2. Denormalize to Process Instance
-		// Parse value JSON?
 		var val any
-		json.Unmarshal([]byte(event.Value), &val)
+		_ = json.Unmarshal([]byte(event.Value), &val)
 
 		indexPi := s.indexNameForTopic("process_instance")
 		script := "if (ctx._source.context == null) { ctx._source.context = new HashMap(); } ctx._source.context[params.name] = params.value;"
@@ -392,14 +415,21 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"name":  event.Name,
 			"value": val,
 		}
-		if err := s.repo.UpdateWithScript(ctx, indexPi, fmt.Sprintf("%d", event.ProcessInstanceKey), script, params); err != nil {
-			return err
+		upsert := map[string]any{
+			"key": event.ProcessInstanceKey, "tenant_id": tenantID, "context": map[string]any{event.Name: val},
 		}
+		return []repository.WriteOp{
+			{Kind: repository.WriteIndex, Index: indexVar, ID: fmt.Sprintf("%d", key), Doc: varDoc},
+			{
+				Kind: repository.WriteUpsertScript, Index: indexPi, ID: fmt.Sprintf("%d", event.ProcessInstanceKey),
+				Script: script, Params: params, Upsert: upsert,
+			},
+		}, nil
 
 	case "JobCreated":
 		var event pb.JobCreated
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal JobCreated: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal JobCreated: %w", err)
 		}
 		doc := map[string]any{
 			"key":                    event.Key,
@@ -411,16 +441,19 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"element_id":             event.ElementId,
 			"state":                  "CREATED",
 			"created_at":             event.CreatedAt.AsTime(),
+			"tenant_id":              tenantID,
 		}
 		index := s.indexNameForTopic("job")
-		if err := s.repo.Upsert(ctx, index, fmt.Sprintf("%d", event.Key), doc); err != nil {
-			return err
-		}
+		script := "for (def entry : params.entrySet()) { if (entry.getKey() != 'state') { ctx._source[entry.getKey()] = entry.getValue(); } } if (ctx._source.state == null) { ctx._source.state = params.state; }"
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: doc, Upsert: doc,
+		}}, nil
 
 	case "JobActivated":
 		var event pb.JobActivated
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal JobActivated: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal JobActivated: %w", err)
 		}
 		index := s.indexNameForTopic("job")
 		script := "ctx._source.state = params.state; ctx._source.worker = params.worker; ctx._source.updated_at = params.updated_at;"
@@ -429,14 +462,19 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"worker":     event.Worker,
 			"updated_at": time.Now(),
 		}
-		if err := s.repo.UpdateWithScript(ctx, index, fmt.Sprintf("%d", event.Key), script, params); err != nil {
-			return err
+		upsert := map[string]any{
+			"key": event.Key, "state": "ACTIVATED", "worker": event.Worker,
+			"updated_at": params["updated_at"], "tenant_id": tenantID,
 		}
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: params, Upsert: upsert,
+		}}, nil
 
 	case "JobCompleted":
 		var event pb.JobCompleted
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal JobCompleted: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal JobCompleted: %w", err)
 		}
 		index := s.indexNameForTopic("job")
 		script := "ctx._source.state = params.state; ctx._source.worker = params.worker; ctx._source.updated_at = params.updated_at;"
@@ -445,14 +483,19 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"worker":     event.Worker,
 			"updated_at": event.UpdatedAt.AsTime(),
 		}
-		if err := s.repo.UpdateWithScript(ctx, index, fmt.Sprintf("%d", event.Key), script, params); err != nil {
-			return err
+		upsert := map[string]any{
+			"key": event.Key, "state": "COMPLETED", "worker": event.Worker,
+			"updated_at": event.UpdatedAt.AsTime(), "tenant_id": tenantID,
 		}
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: params, Upsert: upsert,
+		}}, nil
 
 	case "JobFailed":
 		var event pb.JobFailed
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal JobFailed: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal JobFailed: %w", err)
 		}
 		index := s.indexNameForTopic("job")
 		script := "ctx._source.state = params.state; ctx._source.retries = params.retries; ctx._source.error_message = params.error_message; ctx._source.updated_at = params.updated_at;"
@@ -462,14 +505,19 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"error_message": event.ErrorMessage,
 			"updated_at":    event.UpdatedAt.AsTime(),
 		}
-		if err := s.repo.UpdateWithScript(ctx, index, fmt.Sprintf("%d", event.Key), script, params); err != nil {
-			return err
+		upsert := map[string]any{
+			"key": event.Key, "state": "FAILED", "retries": event.Retries,
+			"error_message": event.ErrorMessage, "updated_at": event.UpdatedAt.AsTime(), "tenant_id": tenantID,
 		}
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: params, Upsert: upsert,
+		}}, nil
 
 	case "ElementInstanceActivated":
 		var event pb.ElementInstanceActivated
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal ElementInstanceActivated: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal ElementInstanceActivated: %w", err)
 		}
 		doc := map[string]any{
 			"key":                    event.Key,
@@ -481,16 +529,19 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"flow_scope_key":         event.FlowScopeKey,
 			"state":                  "ACTIVE",
 			"created_at":             event.CreatedAt.AsTime(),
+			"tenant_id":              tenantID,
 		}
 		index := s.indexNameForTopic("element_instance")
-		if err := s.repo.Upsert(ctx, index, fmt.Sprintf("%d", event.Key), doc); err != nil {
-			return err
-		}
+		script := "for (def entry : params.entrySet()) { if (entry.getKey() != 'state') { ctx._source[entry.getKey()] = entry.getValue(); } } if (ctx._source.state == null || ctx._source.state == 'ACTIVE') { ctx._source.state = params.state; }"
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: doc, Upsert: doc,
+		}}, nil
 
 	case "ElementInstanceCompleted":
 		var event pb.ElementInstanceCompleted
 		if err := proto.Unmarshal(data, &event); err != nil {
-			return fmt.Errorf("failed to unmarshal ElementInstanceCompleted: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal ElementInstanceCompleted: %w", err)
 		}
 		index := s.indexNameForTopic("element_instance")
 		script := "ctx._source.state = params.state; ctx._source.end_time = params.end_time;"
@@ -498,23 +549,76 @@ func (s *SyncService) ProcessEvent(ctx context.Context, eventType string, data [
 			"state":    "COMPLETED",
 			"end_time": event.EndTime.AsTime(),
 		}
-		if err := s.repo.UpdateWithScript(ctx, index, fmt.Sprintf("%d", event.Key), script, params); err != nil {
-			return err
+		upsert := map[string]any{
+			"key": event.Key, "state": "COMPLETED", "end_time": event.EndTime.AsTime(), "tenant_id": tenantID,
 		}
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: index, ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: params, Upsert: upsert,
+		}}, nil
+
+	case "IncidentCreated":
+		var event pb.IncidentCreated
+		if err := proto.Unmarshal(data, &event); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal IncidentCreated: %w", err)
+		}
+		doc := map[string]any{
+			"key": event.Key, "id": event.Id, "process_instance_key": event.ProcessInstanceKey,
+			"element_instance_key": event.ElementInstanceKey, "job_key": event.JobKey,
+			"error_type": event.ErrorType, "error_message": event.ErrorMessage,
+			"state": "CREATED", "created_at": event.CreatedAt.AsTime(), "tenant_id": tenantID,
+		}
+		script := "for (def entry : params.entrySet()) { if (entry.getKey() != 'state') { ctx._source[entry.getKey()] = entry.getValue(); } } if (ctx._source.state == null) { ctx._source.state = params.state; }"
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: s.indexNameForTopic("incident"), ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: doc, Upsert: doc,
+		}}, nil
+
+	case "IncidentResolved":
+		var event pb.IncidentResolved
+		if err := proto.Unmarshal(data, &event); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal IncidentResolved: %w", err)
+		}
+		script := "ctx._source.state = params.state; ctx._source.resolved_at = params.resolved_at;"
+		params := map[string]any{
+			"state": "RESOLVED", "resolved_at": event.ResolvedAt.AsTime(),
+		}
+		upsert := map[string]any{
+			"key": event.Key, "state": "RESOLVED", "resolved_at": event.ResolvedAt.AsTime(), "tenant_id": tenantID,
+		}
+		return []repository.WriteOp{{
+			Kind: repository.WriteUpsertScript, Index: s.indexNameForTopic("incident"), ID: fmt.Sprintf("%d", event.Key),
+			Script: script, Params: params, Upsert: upsert,
+		}}, nil
 	}
 
-	s.log.Info(ctx, "processed event", map[string]any{
-		"type":        eventType,
-		"duration_ms": time.Since(start).Milliseconds(),
-	})
+	return nil, nil
+}
 
-	return nil
+// ApplyWrites executes planned projection writes via Elasticsearch bulk.
+func (s *SyncService) ApplyWrites(ctx context.Context, ops []repository.WriteOp) ([]repository.BulkItemResult, error) {
+	return s.repo.Bulk(ctx, ops)
+}
+
+func (s *SyncService) applyWriteOp(ctx context.Context, op repository.WriteOp) error {
+	switch op.Kind {
+	case repository.WriteIndex:
+		return s.repo.Upsert(ctx, op.Index, op.ID, op.Doc)
+	case repository.WriteDelete:
+		return s.repo.Delete(ctx, op.Index, op.ID)
+	case repository.WriteUpdateScript:
+		return s.repo.UpdateWithScript(ctx, op.Index, op.ID, op.Script, op.Params)
+	case repository.WriteUpsertScript:
+		return s.repo.UpsertWithScript(ctx, op.Index, op.ID, op.Script, op.Params, op.Upsert)
+	default:
+		return fmt.Errorf("unsupported write kind %d", op.Kind)
+	}
 }
 
 // generateDeterministicKey uses FNV to generate keys for variables/deduplication
 func generateDeterministicKey(s string) int64 {
 	h := fnv.New64a()
 	h.Write([]byte(s))
-	// Ensure positive key
+	// #nosec G115 -- masked to 63 bits, so the value always fits in int64.
 	return int64(h.Sum64() & 0x7FFFFFFFFFFFFFFF)
 }

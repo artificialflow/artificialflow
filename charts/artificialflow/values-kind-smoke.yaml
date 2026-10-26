@@ -1,0 +1,7 @@
+iam:
+  mode: false
+ingress:
+  enabled: false
+gateway:
+  hsts:
+    enabled: false

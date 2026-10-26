@@ -9,18 +9,12 @@ import { fileURLToPath } from "node:url";
 
 const base = (process.env.ARTIFICIALFLOW_BASE_URL || "http://localhost:9100/api").replace(/\/$/, "");
 const token = process.env.ARTIFICIALFLOW_TOKEN || "";
-const actingUser = process.env.ARTIFICIALFLOW_ACTING_USER || "approver";
+const endUser = process.env.ARTIFICIALFLOW_END_USER || "approver";
 
-if (!token) {
-  console.error("Set ARTIFICIALFLOW_TOKEN to a bearer token with deploy/start/job/inbox rights");
-  process.exit(2);
-}
-
+// ARTIFICIALFLOW_TOKEN is required only with IAM_DEPLOYMENT_MODE=true.
 const headers = {
-  Authorization: `Bearer ${token}`,
+  ...(token ? { Authorization: `Bearer ${token}` } : {}),
   "Content-Type": "application/json",
-  "X-ArtificialFlow-Acting-Username": actingUser,
-  "X-ArtificialFlow-Acting-Subject": actingUser,
 };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -113,28 +107,21 @@ if (!workerDone) {
   throw new Error(`no golden-validate job activated for instance ${instanceId}`);
 }
 
-// Inbox claim/complete
-let match;
+// Pending task lookup, claim and complete on behalf of the end user
+let task;
 for (let i = 0; i < 30; i++) {
-  const inbox = await req("GET", "/inbox");
-  const items = Array.isArray(inbox) ? inbox : inbox.instances || [];
-  match = items.find((item) => String(item.id) === String(instanceId));
-  if (match) break;
+  const found = await req("GET", `/tasks?processInstanceKey=${instanceId}`);
+  task = (found.tasks || [])[0];
+  if (task) break;
   await new Promise((r) => setTimeout(r, 1000));
 }
-if (!match) {
-  throw new Error("instance not visible in inbox yet; check CQRS lag / assignment");
-}
-const tasks = await req("GET", `/inbox/instances/${match.id}/tasks`);
-const taskList = tasks.tasks || tasks || [];
-const task = taskList.find((t) => t.canClaim || t.canComplete) || taskList[0];
 if (!task) {
-  throw new Error("no inbox tasks for instance");
+  throw new Error(`no user task for instance ${instanceId}`);
 }
-const executionId = task.executionId || task.execution_id || task.id;
+const taskPath = `/instances/${task.processInstanceKey}/tasks/${task.executionId}`;
 if (task.canClaim) {
-  await req("POST", `/inbox/instances/${match.id}/tasks/${executionId}/claim`, {});
+  await req("POST", `${taskPath}/claim`, { assignee: endUser });
 }
-await req("POST", `/inbox/instances/${match.id}/tasks/${executionId}/complete`, {});
-console.log("inbox task completed", executionId);
+await req("POST", `${taskPath}/complete`, { assignee: endUser });
+console.log("user task completed", task.executionId, "as", endUser);
 console.log("golden demo bake-off OK");

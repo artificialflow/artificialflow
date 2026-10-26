@@ -14,12 +14,10 @@ import (
 func TestIntrospectionVerifierAcceptsBrowserJWT(t *testing.T) {
 	verifier, requests := newTestIntrospectionVerifier(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeIntrospectionResponse(t, w, map[string]any{
-			"active": true,
-			"sub":    "user-1",
-			"exp":    time.Now().Add(time.Hour).Unix(),
-			"urn:zitadel:iam:org:project:project-1:roles": map[string]any{
-				RoleArtificialFlowAdmin: map[string]any{},
-			},
+			"active":       true,
+			"sub":          "user-1",
+			"exp":          time.Now().Add(time.Hour).Unix(),
+			"realm_access": map[string]any{"roles": []any{RoleAdmin}},
 		})
 	})
 
@@ -27,7 +25,7 @@ func TestIntrospectionVerifierAcceptsBrowserJWT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected browser JWT to be accepted by introspection: %v", err)
 	}
-	if principal.Subject != "user-1" || !principal.HasRole(RoleArtificialFlowAdmin) {
+	if principal.Subject != "user-1" || !principal.HasRole(RoleAdmin) {
 		t.Fatalf("unexpected principal: %#v", principal)
 	}
 	if requests() != 1 {
@@ -35,8 +33,8 @@ func TestIntrospectionVerifierAcceptsBrowserJWT(t *testing.T) {
 	}
 }
 
-func TestIntrospectionVerifierAcceptsSDKClientPATWithRole(t *testing.T) {
-	const opaquePAT = "opaque-sdk-client-token"
+func TestIntrospectionVerifierAcceptsOpaqueSDKClientTokenWithRole(t *testing.T) {
+	const opaqueToken = "opaque-sdk-client-token"
 	verifier, _ := newTestIntrospectionVerifier(t, func(w http.ResponseWriter, r *http.Request) {
 		if username, password, ok := r.BasicAuth(); !ok || username != "artificialflow-api" || password != "introspection-secret" {
 			t.Fatalf("unexpected introspection credentials: username=%q ok=%v", username, ok)
@@ -44,26 +42,24 @@ func TestIntrospectionVerifierAcceptsSDKClientPATWithRole(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
-		if r.Form.Get("token") != opaquePAT {
+		if r.Form.Get("token") != opaqueToken {
 			t.Fatalf("unexpected token submitted for introspection")
 		}
 		writeIntrospectionResponse(t, w, map[string]any{
-			"active":   true,
-			"sub":      "sdk-client-1",
-			"username": "orders-worker",
-			"exp":      time.Now().Add(time.Hour).Unix(),
-			"urn:zitadel:iam:org:project:project-1:roles": map[string]any{
-				RoleArtificialFlowClient: map[string]any{},
-			},
+			"active":       true,
+			"sub":          "sdk-client-1",
+			"username":     "orders-worker",
+			"exp":          time.Now().Add(time.Hour).Unix(),
+			"realm_access": map[string]any{"roles": []any{RoleClient}},
 		})
 	})
 
-	principal, err := verifier.Verify(context.Background(), opaquePAT)
+	principal, err := verifier.Verify(context.Background(), opaqueToken)
 	if err != nil {
-		t.Fatalf("expected SDK PAT to be accepted: %v", err)
+		t.Fatalf("expected opaque SDK token to be accepted: %v", err)
 	}
-	if principal.Subject != "sdk-client-1" || !principal.HasRole(RoleArtificialFlowClient) {
-		t.Fatalf("expected artificialflow client principal, got %#v", principal)
+	if principal.Subject != "sdk-client-1" || !principal.HasRole(RoleClient) {
+		t.Fatalf("expected artificialflowclient principal, got %#v", principal)
 	}
 	if principal.TokenMode != TokenModeIntrospection {
 		t.Fatalf("expected introspection token mode, got %q", principal.TokenMode)
@@ -122,7 +118,7 @@ func newTestIntrospectionVerifier(t *testing.T, handler http.HandlerFunc) (Token
 		IntrospectionClientID:     "artificialflow-api",
 		IntrospectionClientSecret: "introspection-secret",
 		IntrospectionAuthMethod:   "basic",
-		ClaimRolesPath:            "roles,urn:zitadel:iam:org:project:roles,groups",
+		ClaimRolesPath:            "roles,realm_access.roles,groups",
 		ClaimSubjectPath:          "sub",
 		EnforceAudience:           false,
 	})
@@ -171,7 +167,7 @@ func TestIntrospectionVerifierPostAuthentication(t *testing.T) {
 
 func TestIntrospectionVerifierUsesPublicIssuerHostForInternalProxy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != "localhost:9180" {
+		if r.Host != "localhost:9181" {
 			t.Fatalf("expected public issuer host, got %q", r.Host)
 		}
 		writeIntrospectionResponse(t, w, map[string]any{"active": true, "sub": "client-1"})
@@ -181,7 +177,7 @@ func TestIntrospectionVerifierUsesPublicIssuerHostForInternalProxy(t *testing.T)
 		IntrospectionURL:          server.URL,
 		IntrospectionClientID:     "artificialflow-api",
 		IntrospectionClientSecret: "introspection-secret",
-		ExternalIssuerURL:         "http://localhost:9180",
+		ExternalIssuerURL:         "http://localhost:9181",
 		AllowInsecureIssuer:       true,
 	})
 	if err != nil {

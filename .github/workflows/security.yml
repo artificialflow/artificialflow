@@ -17,8 +17,28 @@ permissions:
 # repos. The upstream gitleaks CLI is MIT-licensed and free for org use.
 env:
   GITLEAKS_VERSION: "8.30.1"
+  GOVULNCHECK_VERSION: "v1.1.4"
+  GOSEC_VERSION: "v2.22.8"
 
 jobs:
+  gateway-and-helm-policy:
+    name: Gateway and Helm Security Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: Validate gateway configuration
+        run: bash scripts/validate_gateway_security.sh
+
+      - name: Validate rendered workload policies
+        run: bash scripts/validate_helm.sh
+
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
@@ -51,10 +71,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.26.9"
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
 
       - name: Run govulncheck
         run: govulncheck ./...
@@ -94,10 +114,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run gosec
-        uses: securego/gosec@master
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          args: -severity medium -exclude=G102,G304,G703,G704 -exclude-generated -exclude-dir=vendor ./backend/...
+          go-version: "1.26.9"
+
+      - name: Install pinned gosec
+        run: go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+
+      - name: Run gosec
+        run: gosec -severity medium -exclude=G102,G304,G703,G704 -exclude-generated -exclude-dir=vendor ./backend/...
 
   trivy-filesystem:
     name: Trivy Filesystem Scan
@@ -117,7 +143,6 @@ jobs:
 
   codeql:
     name: CodeQL
-    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

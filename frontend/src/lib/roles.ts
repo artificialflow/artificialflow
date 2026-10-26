@@ -1,13 +1,15 @@
 import type { IdentityResponse } from "@/lib/api";
 
-export const ARTIFICIALFLOW_ADMIN_ROLE = "artificialflow admin";
-export const ARTIFICIALFLOW_MODELER_ROLE = "artificialflow modeler";
-export const ARTIFICIALFLOW_CLIENT_ROLE = "artificialflow client";
+export const ARTIFICIALFLOW_ADMIN_ROLE = "artificialflowadmin";
+export const ARTIFICIALFLOW_BUSINESS_ROLE = "artificialflowbusiness";
+export const ARTIFICIALFLOW_CLIENT_ROLE = "artificialflowclient";
+export const ARTIFICIALFLOW_ANALYTICS_ROLE = "artificialflowanalytics";
 
 export const STATIC_ARTIFICIALFLOW_ROLES = [
   ARTIFICIALFLOW_ADMIN_ROLE,
-  ARTIFICIALFLOW_MODELER_ROLE,
+  ARTIFICIALFLOW_BUSINESS_ROLE,
   ARTIFICIALFLOW_CLIENT_ROLE,
+  ARTIFICIALFLOW_ANALYTICS_ROLE,
 ];
 
 function normalizeRole(role: string) {
@@ -16,16 +18,7 @@ function normalizeRole(role: string) {
 
 export function canonicalizeRole(role: string): string {
   const normalized = normalizeRole(role);
-  switch (normalized) {
-    case ARTIFICIALFLOW_ADMIN_ROLE:
-      return ARTIFICIALFLOW_ADMIN_ROLE;
-    case ARTIFICIALFLOW_MODELER_ROLE:
-      return ARTIFICIALFLOW_MODELER_ROLE;
-    case ARTIFICIALFLOW_CLIENT_ROLE:
-      return ARTIFICIALFLOW_CLIENT_ROLE;
-    default:
-      return role.trim();
-  }
+  return STATIC_ARTIFICIALFLOW_ROLES.find((standard) => standard === normalized) ?? role.trim();
 }
 
 export function canonicalizeRoles(roles: string[]): string[] {
@@ -53,19 +46,24 @@ export function hasAnyRole(identity: IdentityResponse | null, roles: string[]): 
   return roles.some((role) => hasRole(identity, role));
 }
 
-export function hasFlexRole(identity: IdentityResponse | null): boolean {
-  const staticRoles = new Set(STATIC_ARTIFICIALFLOW_ROLES.map(normalizeRole));
-  return identityRoles(identity).some((role) => !staticRoles.has(normalizeRole(role)));
-}
-
 export function isAdmin(identity: IdentityResponse | null): boolean {
   return hasRole(identity, ARTIFICIALFLOW_ADMIN_ROLE);
 }
 
-export function isModeler(identity: IdentityResponse | null): boolean {
-  return hasRole(identity, ARTIFICIALFLOW_MODELER_ROLE);
+export function isBusiness(identity: IdentityResponse | null): boolean {
+  return hasRole(identity, ARTIFICIALFLOW_BUSINESS_ROLE);
 }
 
+export function isAnalytics(identity: IdentityResponse | null): boolean {
+  return hasRole(identity, ARTIFICIALFLOW_ANALYTICS_ROLE);
+}
+
+/** Service accounts for SDK/API integrations; they have no console access. */
 export function isClientOnly(identity: IdentityResponse | null): boolean {
-  return hasRole(identity, ARTIFICIALFLOW_CLIENT_ROLE) && !isAdmin(identity) && !isModeler(identity);
+  return (
+    hasRole(identity, ARTIFICIALFLOW_CLIENT_ROLE) &&
+    !isAdmin(identity) &&
+    !isBusiness(identity) &&
+    !isAnalytics(identity)
+  );
 }

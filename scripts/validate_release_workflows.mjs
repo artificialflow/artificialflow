@@ -8,6 +8,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release.yml"), "utf8");
 const imageWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release-images.yml"), "utf8");
 const npmWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release-npm.yml"), "utf8");
+const nugetWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release-nuget.yml"), "utf8");
+const mavenWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release-maven.yml"), "utf8");
+const evidenceWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release-evidence.yml"), "utf8");
 const failures = [];
 
 function requireText(source, text, label) {
@@ -50,11 +53,25 @@ requireText(
   "uses: ./.github/workflows/release-npm.yml",
   "orchestrator must call the reusable npm workflow",
 );
-requireText(releaseWorkflow, "    needs: images", "npm release job must need the complete image workflow");
 requireText(
   releaseWorkflow,
-  "      images_verified: true",
-  "orchestrator must attest the image dependency to the npm reusable workflow",
+  "uses: ./.github/workflows/release-nuget.yml",
+  "orchestrator must call the reusable NuGet workflow",
+);
+requireText(
+  releaseWorkflow,
+  "uses: ./.github/workflows/release-maven.yml",
+  "orchestrator must call the reusable Maven workflow",
+);
+requireText(
+  releaseWorkflow,
+  "    needs: production-evidence",
+  "production promotion approval must depend on complete production evidence",
+);
+requireText(
+  releaseWorkflow,
+  "      name: release-production",
+  "promotion must use the protected release-production environment",
 );
 requireCount(
   `${releaseWorkflow}\n${imageWorkflow}\n${npmWorkflow}`,
@@ -64,13 +81,49 @@ requireCount(
 );
 requireAbsent(imageWorkflow, "  push:\n", "reusable image workflow must not have an independent push trigger");
 requireAbsent(npmWorkflow, "  push:\n", "reusable npm workflow must not have an independent push trigger");
+requireAbsent(nugetWorkflow, "  push:\n", "reusable NuGet workflow must not have an independent push trigger");
+requireAbsent(mavenWorkflow, "  push:\n", "reusable Maven workflow must not have an independent push trigger");
 requireText(imageWorkflow, "  workflow_call:", "image workflow must be reusable");
 requireText(npmWorkflow, "  workflow_call:", "npm workflow must be reusable");
+requireText(nugetWorkflow, "  workflow_call:", "NuGet workflow must be reusable");
+requireText(mavenWorkflow, "  workflow_call:", "Maven workflow must be reusable");
+requireText(
+  nugetWorkflow,
+  "if: ${{ inputs.publish && !inputs.images_verified }}",
+  "direct NuGet publication must fail without the orchestrated image dependency",
+);
+requireText(
+  mavenWorkflow,
+  "if: ${{ inputs.publish && !inputs.images_verified }}",
+  "direct Maven publication must fail without the orchestrated image dependency",
+);
 requireOrder(
   releaseWorkflow,
-  "uses: ./.github/workflows/release-images.yml",
-  "uses: ./.github/workflows/release-npm.yml",
-  "orchestrator must declare images before npm",
+  "candidate-images:",
+  "promotion-approval:",
+  "candidate image validation must precede promotion approval",
+);
+requireOrder(
+  releaseWorkflow,
+  "promotion-approval:",
+  "promote-images:",
+  "image promotion must follow protected approval",
+);
+requireOrder(
+  releaseWorkflow,
+  "promote-images:",
+  "publish-npm:",
+  "npm publication must follow image promotion",
+);
+requireText(
+  releaseWorkflow,
+  "uses: ./.github/workflows/release-evidence.yml",
+  "release orchestrator must execute the production evidence workflow",
+);
+requireText(
+  releaseWorkflow,
+  "python3 scripts/release/evidence.py report --phase all",
+  "post-publish job must generate the complete fail-closed evidence report",
 );
 
 requireText(imageWorkflow, "release-preflight:", "image workflow must define a release preflight job");
@@ -79,6 +132,16 @@ requireText(
   imageWorkflow,
   "node scripts/validate_release_version.mjs",
   "image preflight must validate its supplied release tag",
+);
+requireText(
+  imageWorkflow,
+  "if: ${{ steps.version.outputs.publish == 'true' && inputs.promote }}",
+  "final image references must require explicit promotion mode",
+);
+requireText(
+  imageWorkflow,
+  "name: candidate-images-${{ inputs.promote }}",
+  "candidate digest locks must be retained as workflow artifacts",
 );
 requireCount(
   imageWorkflow,
@@ -111,6 +174,30 @@ requireOrder(
   "Login to Docker Hub",
   "Inspect deterministic candidate",
   "registry authentication must precede candidate existence checks",
+);
+
+requireText(
+  evidenceWorkflow,
+  "runs-on: [self-hosted, linux, release-evidence]",
+  "production evidence must run on the dedicated release evidence runner",
+);
+requireText(
+  evidenceWorkflow,
+  "python3 scripts/release/evidence.py report --phase pre-publish",
+  "production evidence workflow must fail closed before promotion",
+);
+for (const gate of ["REL-001"]) {
+  requireText(evidenceWorkflow, gate, `production evidence workflow is missing ${gate}`);
+}
+requireText(
+  evidenceWorkflow,
+  "bash scripts/release/run_soak.sh",
+  "production evidence workflow is missing the unchanged-digest soak",
+);
+requireText(
+  evidenceWorkflow,
+  "bash scripts/release/security_gate.sh",
+  "production evidence workflow is missing the blocking security gate",
 );
 requireOrder(
   imageWorkflow,
@@ -215,7 +302,7 @@ requireAbsent(npmWorkflow, "sleep 30", "npm workflow must not poll the registry"
 requireOrder(
   npmWorkflow,
   "Refuse existing exact npm versions",
-  "npm publish --access public --provenance --tag \"${{ steps.release.outputs.dist_tag }}\"",
+  "npm publish \"${{ steps.package.outputs.filename }}\" --access public --provenance --tag \"${{ steps.release.outputs.dist_tag }}\"",
   "exact npm collision checks must run before canonical publication",
 );
 

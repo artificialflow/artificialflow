@@ -28,7 +28,6 @@ func (r *Repository) Upsert(ctx context.Context, index string, id string, doc an
 		Index:      index,
 		DocumentID: id,
 		Body:       bytes.NewReader(body),
-		Refresh:    "true",
 	}
 
 	res, err := req.Do(ctx, r.client.Raw())
@@ -48,7 +47,6 @@ func (r *Repository) Delete(ctx context.Context, index string, id string) error 
 	req := esapi.DeleteRequest{
 		Index:      index,
 		DocumentID: id,
-		Refresh:    "true",
 	}
 
 	res, err := req.Do(ctx, r.client.Raw())
@@ -96,6 +94,16 @@ func (r *Repository) Search(ctx context.Context, index string, query json.RawMes
 
 // UpdateWithScript updates a document using a Painless script.
 func (r *Repository) UpdateWithScript(ctx context.Context, index string, id string, script string, params map[string]any) error {
+	return r.updateWithScript(ctx, index, id, script, params, nil)
+}
+
+// UpsertWithScript applies a scripted update and creates the supplied
+// document when the event arrives before its projection parent.
+func (r *Repository) UpsertWithScript(ctx context.Context, index string, id string, script string, params, upsert map[string]any) error {
+	return r.updateWithScript(ctx, index, id, script, params, upsert)
+}
+
+func (r *Repository) updateWithScript(ctx context.Context, index string, id string, script string, params, upsert map[string]any) error {
 	body := map[string]any{
 		"script": map[string]any{
 			"source": script,
@@ -103,17 +111,21 @@ func (r *Repository) UpdateWithScript(ctx context.Context, index string, id stri
 			"params": params,
 		},
 	}
+	if upsert != nil {
+		body["upsert"] = upsert
+	}
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
 
+	retryOnConflict := 5
 	req := esapi.UpdateRequest{
-		Index:      index,
-		DocumentID: id,
-		Body:       bytes.NewReader(bodyBytes),
-		Refresh:    "true",
+		Index:           index,
+		DocumentID:      id,
+		Body:            bytes.NewReader(bodyBytes),
+		RetryOnConflict: &retryOnConflict,
 	}
 
 	res, err := req.Do(ctx, r.client.Raw())
@@ -122,9 +134,6 @@ func (r *Repository) UpdateWithScript(ctx context.Context, index string, id stri
 	}
 	defer res.Body.Close()
 
-	// 404 is NOT okay here, we expect the parent document to exist.
-	// But if it doesn't, we might want to handle it (upsert?).
-	// For now, if it fails, it fails.
 	if res.IsError() {
 		return fmt.Errorf("elasticsearch update_with_script failed: index=%s id=%s status=%s", index, id, res.Status())
 	}

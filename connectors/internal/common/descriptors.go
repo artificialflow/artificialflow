@@ -1,6 +1,10 @@
 package common
 
-import "strings"
+import (
+	_ "embed"
+	"encoding/json"
+	"strings"
+)
 
 // ConnectorField describes a single connector input variable.
 type ConnectorField struct {
@@ -21,62 +25,18 @@ type ConnectorDescriptor struct {
 	Fields      []ConnectorField `json:"fields"`
 }
 
-// Descriptors is the registry of official ArtificialFlow connectors.
-var Descriptors = []ConnectorDescriptor{
-	{
-		JobType:     "io.artificialflow.connector.http",
-		Name:        "HTTP",
-		Description: "Outbound HTTP request",
-		Fields: []ConnectorField{
-			{Key: "url", Label: "URL", Required: true, Kind: "string", Description: "Absolute HTTPS/HTTP URL"},
-			{Key: "method", Label: "Method", Required: false, Kind: "string", Default: "POST", Description: "HTTP method"},
-			{Key: "headers", Label: "Headers", Required: false, Kind: "json", Description: "JSON object of headers"},
-			{Key: "body", Label: "Body", Required: false, Kind: "json", Description: "JSON-serializable request body"},
-			{Key: "timeoutMs", Label: "Timeout (ms)", Required: false, Kind: "number", Default: "10000", Description: "Request timeout in milliseconds"},
-			{Key: "failOnNon2xx", Label: "Fail on non-2xx", Required: false, Kind: "boolean", Default: "true", Description: "Fail the job when the response status is not 2xx"},
-		},
-	},
-	{
-		JobType:     "io.artificialflow.connector.webhook",
-		Name:        "Webhook",
-		Description: "POST to a webhook URL (e.g. Slack)",
-		Fields: []ConnectorField{
-			{Key: "webhookUrl", Label: "Webhook URL", Required: true, Kind: "string", Description: "Absolute webhook URL"},
-			{Key: "payload", Label: "Payload", Required: false, Kind: "json", Description: "JSON payload body"},
-			{Key: "webhookToken", Label: "Webhook Token", Required: false, Kind: "string", Description: "Optional Bearer token"},
-		},
-	},
-	{
-		JobType:     "io.artificialflow.connector.kafka",
-		Name:        "Kafka",
-		Description: "Publish a Kafka message",
-		Fields: []ConnectorField{
-			{Key: "kafkaTopic", Label: "Topic", Required: true, Kind: "string", Description: "Kafka topic"},
-			{Key: "kafkaKey", Label: "Key", Required: false, Kind: "string", Description: "Optional message key"},
-			{Key: "kafkaValue", Label: "Value", Required: false, Kind: "json", Description: "Message value (JSON or string)"},
-		},
-	},
-	{
-		JobType:     "io.artificialflow.connector.email",
-		Name:        "Email",
-		Description: "Send email via SMTP",
-		Fields: []ConnectorField{
-			{Key: "emailTo", Label: "To", Required: true, Kind: "string", Description: "Recipient address"},
-			{Key: "emailSubject", Label: "Subject", Required: true, Kind: "string", Description: "Email subject"},
-			{Key: "emailBody", Label: "Body", Required: false, Kind: "string", Description: "Email body"},
-		},
-	},
-	{
-		JobType:     "io.artificialflow.connector.s3",
-		Name:        "S3",
-		Description: "Put object to S3-compatible storage",
-		Fields: []ConnectorField{
-			{Key: "s3Bucket", Label: "Bucket", Required: true, Kind: "string", Description: "S3 bucket name"},
-			{Key: "s3Key", Label: "Key", Required: true, Kind: "string", Description: "Object key"},
-			{Key: "s3Body", Label: "Body", Required: false, Kind: "string", Description: "Object body"},
-			{Key: "contentType", Label: "Content-Type", Required: false, Kind: "string", Description: "MIME type"},
-		},
-	},
+//go:embed descriptors.json
+var descriptorJSON []byte
+
+// Descriptors is loaded from the canonical descriptor file shared with the UI.
+var Descriptors = mustLoadDescriptors()
+
+func mustLoadDescriptors() []ConnectorDescriptor {
+	var descriptors []ConnectorDescriptor
+	if err := json.Unmarshal(descriptorJSON, &descriptors); err != nil {
+		panic("invalid embedded connector descriptors: " + err.Error())
+	}
+	return descriptors
 }
 
 // DescriptorByJobType returns the descriptor for a job type, if known.

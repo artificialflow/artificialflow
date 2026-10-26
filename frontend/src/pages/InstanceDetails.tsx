@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router";
-import { api, type IdentityResponse, type InstanceJob, type UserTask, type WorkflowInstance } from "@/lib/api";
+import { api, type IdentityResponse, type InstanceJob, type UserTask, type WorkflowInstance, type InstanceMigrationResult } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,7 +8,6 @@ import { ArrowLeft, Save, RefreshCw } from "lucide-react";
 import BpmnViewer from "@/components/bpmn/BpmnViewer";
 import VariablesEditor from "@/components/VariablesEditor";
 import { isAdmin } from "@/lib/roles";
-import { Link } from "react-router";
 
 export default function InstanceDetails() {
   const { id } = useParams<{ id: string }>();
@@ -25,6 +24,11 @@ export default function InstanceDetails() {
   const [processVersion, setProcessVersion] = useState<number | null>(null);
   const [identity, setIdentity] = useState<IdentityResponse | null>(null);
   const [jobs, setJobs] = useState<InstanceJob[]>([]);
+  const [migrationTarget, setMigrationTarget] = useState("");
+  const [migrationMapping, setMigrationMapping] = useState("{}");
+  const [migrationOperationId, setMigrationOperationId] = useState("");
+  const [migrationResult, setMigrationResult] = useState<InstanceMigrationResult | null>(null);
+  const [migrating, setMigrating] = useState(false);
 
   const fetchInstance = useCallback(async (isRefresh = false) => {
     if (!id) return;
@@ -145,6 +149,30 @@ export default function InstanceDetails() {
       alert(err instanceof Error ? err.message : "Failed to update variables.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runMigration = async (dryRun: boolean) => {
+    if (!id || !instance || !migrationTarget.trim()) return;
+    setMigrating(true);
+    try {
+      const elementMapping = JSON.parse(migrationMapping) as Record<string, string>;
+      const result = await api.migrateInstance(id, {
+        sourceDefinitionKey: instance.workflow_id,
+        targetDefinitionKey: migrationTarget.trim(),
+        elementMapping,
+        operationId: migrationOperationId.trim() || undefined,
+      }, dryRun);
+      setMigrationResult(result);
+      if (result.operationId) setMigrationOperationId(result.operationId);
+      if (!dryRun && result.status === "APPLIED") await fetchInstance(true);
+    } catch (err) {
+      setMigrationResult({
+        operationId: "", instanceKey: id, dryRun, status: "REJECTED",
+        message: err instanceof Error ? err.message : "Migration failed",
+      });
+    } finally {
+      setMigrating(false);
     }
   };
 
@@ -285,10 +313,6 @@ export default function InstanceDetails() {
                                           <Button size="sm" variant="outline" onClick={() => handleClaimUserTask(exec.id)}>
                                             Take Task
                                           </Button>
-                                        ) : exec.task.canClaim || exec.task.canComplete ? (
-                                          <Button size="sm" variant="outline" asChild>
-                                            <Link to="/inbox">Open Task Inbox</Link>
-                                          </Button>
                                         ) : (
                                           <Button size="sm" disabled>
                                             Not Assigned
@@ -373,6 +397,65 @@ export default function InstanceDetails() {
                       </div>
                     ))
                   )}
+                </CardContent>
+              </Card>
+            )}
+            {canManageTasks && instance.status !== "COMPLETED" && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Instance Migration</CardTitle>
+                  <div className="text-xs text-muted-foreground">
+                    Validate a complete active wait-state mapping before applying a newer definition. Completed history is never rewritten.{" "}
+                    <a
+                      className="underline"
+                      href="https://github.com/artificialflow/artificialflow/blob/main/docs/INSTANCE_MIGRATION.md"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Support and undo guidance
+                    </a>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <input
+                    className="w-full rounded-md border px-3 py-2 text-sm"
+                    placeholder="Target definition key"
+                    value={migrationTarget}
+                    onChange={(event) => {
+                      setMigrationTarget(event.target.value);
+                      setMigrationResult(null);
+                    }}
+                  />
+                  <input
+                    className="w-full rounded-md border px-3 py-2 text-sm"
+                    aria-label="Migration operation ID"
+                    placeholder="Operation ID (generated by dry run)"
+                    value={migrationOperationId}
+                    onChange={(event) => {
+                      setMigrationOperationId(event.target.value);
+                      setMigrationResult(null);
+                    }}
+                  />
+                  <textarea
+                    className="min-h-28 w-full rounded-md border px-3 py-2 font-mono text-xs"
+                    aria-label="Element mapping JSON"
+                    value={migrationMapping}
+                    onChange={(event) => {
+                      setMigrationMapping(event.target.value);
+                      setMigrationResult(null);
+                    }}
+                  />
+                  <div className="flex gap-2">
+                    <Button variant="outline" disabled={migrating} onClick={() => runMigration(true)}>Dry run</Button>
+                    <Button disabled={migrating || migrationResult?.status !== "VALIDATED"} onClick={() => runMigration(false)}>Apply</Button>
+                  </div>
+                  {migrationResult ? (
+                    <div className="rounded-md border p-2 text-xs">
+                      {migrationResult.status}
+                      {migrationResult.reasonCode ? ` · ${migrationResult.reasonCode}` : ""}
+                      {migrationResult.message ? ` · ${migrationResult.message}` : ""}
+                    </div>
+                  ) : null}
                 </CardContent>
               </Card>
             )}

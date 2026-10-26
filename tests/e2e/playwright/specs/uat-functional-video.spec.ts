@@ -1,18 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
-import { ArtificialFlowClient as NodeSDKClient } from "../../../../clients/nodejs-sdk/src/Client";
-import { ZitadelJwtProfileAuthProvider } from "../../../../clients/nodejs-sdk/src/Auth";
-import type { ZitadelJwtProfile } from "../../../../clients/nodejs-sdk/src/types";
-import { createServiceAccountProfile, generateServiceAccountKeyPair } from "../../../../frontend/src/lib/serviceAccount";
 import { buildBpmnFixture, type BpmnFixtureName } from "../fixtures/uat/bpmn";
 import { uatCases, type UatCase } from "../fixtures/uat/cases";
 import { loginForDeployment, type UatDeployment } from "../fixtures/uat/auth";
-import { ArtificialFlowApi, type ActingUser, type WorkflowInstance } from "../fixtures/uat/artificialflow-api";
+import { ArtificialFlowApi, type EndUser, type WorkflowInstance } from "../fixtures/uat/artificialflow-api";
 import { runDir, writeCaseResult } from "../fixtures/uat/results";
 
 test.use({ trace: "retain-on-failure", screenshot: "only-on-failure" });
 test.describe.configure({ mode: "serial" });
 
-const deployment = (process.env.UAT_DEPLOYMENT || "bundled-zitadel") as UatDeployment;
+const deployment = (process.env.UAT_DEPLOYMENT || "external-keycloak") as UatDeployment;
 const runId = process.env.UAT_RUN_ID || new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 const caseFilter = new Set((process.env.UAT_CASE_FILTER || "").split(",").map((item) => item.trim()).filter(Boolean));
 const casesToRun = uatCases.filter((uatCase) => caseFilter.size === 0 || caseFilter.has(uatCase.id));
@@ -36,16 +32,6 @@ test.describe(`ArtificialFlow UAT video suite - ${deployment}`, () => {
 
       try {
         console.log(`[uat-case] start ${deployment} ${uatCase.id}`);
-        if (deployment === "external-keycloak" && uatCase.bundledOnly) {
-          resultCase = {
-            ...uatCase,
-            expected: "expected-skip",
-            reason: "This case validates bundled ZITADEL admin-only management APIs and is intentionally skipped for external Keycloak.",
-          };
-          await showExpectedSkip(page, resultCase, deployment);
-          return;
-        }
-
         await runUatCase(page, uatCase, deployment);
         console.log(`[uat-case] complete ${deployment} ${uatCase.id}`);
       } catch (err) {
@@ -71,7 +57,7 @@ async function runUatCase(page: Page, uatCase: UatCase, mode: UatDeployment): Pr
   await loginForDeployment(page, mode);
   console.log(`[uat-case] authenticated ${uatCase.id}`);
   const api = new ArtificialFlowApi(page);
-  const created = { workflows: [] as string[], instances: [] as string[], clients: [] as string[], users: [] as string[], roles: [] as string[] };
+  const created = { workflows: [] as string[], instances: [] as string[] };
 
   try {
     await addBanner(page, `${uatCase.id}: ${uatCase.title}`);
@@ -114,9 +100,6 @@ async function runUatCase(page: Page, uatCase: UatCase, mode: UatDeployment): Pr
       case "UAT-WORKER-001":
         await runWorkerGuardrailCase(page, api);
         break;
-      case "UAT-IAM-002":
-        await runBundledIdentityManagementCase(page, api, created);
-        break;
       default:
         await runDeployOnlyBpmnCase(page, api, uatCase, created);
         break;
@@ -133,7 +116,7 @@ async function runRoleBasedComplexCase(page: Page, api: ArtificialFlowApi, uatCa
   const accountant = roleUser("accountant", mode);
   const reviewer = roleUser("reviewer", mode);
 
-  await provisionRoleUsers(api, mode, accountant, reviewer, created);
+  await provisionRoleUsers();
 
   await page.goto("/processes", { waitUntil: "domcontentloaded" });
   await addBanner(page, "UAT starts from Processes: create a complex approval workflow");
@@ -165,11 +148,11 @@ async function runRoleBasedComplexCase(page: Page, api: ArtificialFlowApi, uatCa
   await completeWorkerJob(page, api, "uat-complex-worker", "uat-complex-worker");
   await api.waitForInstanceStatus(instance.id, (item) => activeSteps(item).includes("accountantReview"));
   const accountantReviewExecution = activeExecutionForStep(await api.getInstance(instance.id), "accountantReview");
-  const inboxToken = await provisionInboxClientToken(page, api, mode, created);
+  const clientToken = await provisionClientToken(page, api, mode, created);
 
-  await assertInboxCannotSeeOrClaimTask(page, api, inboxToken, actingUserForRole(reviewer), instance.id, accountantReviewExecution.id, "accountantReview");
+  await assertEndUserDoesNotSeeTask(page, api, clientToken, endUserForRole(reviewer), instance.id, accountantReviewExecution.id, "accountantReview");
 
-  await completeTaskFromInbox(page, api, inboxToken, actingUserForRole(accountant), instance.id, "accountantReview", "Accountant takes and completes accountantReview through ArtificialFlow Transaction Inbox");
+  await completeTaskForEndUser(page, api, clientToken, endUserForRole(accountant), instance.id, "accountantReview", "Client app finds, claims and completes accountantReview for the accountant");
 
   await api.waitForInstanceStatus(instance.id, (item) =>
     activeSteps(item).includes("receiveDocuments") && activeSteps(item).includes("receiveBudgetConfirmation")
@@ -179,9 +162,9 @@ async function runRoleBasedComplexCase(page: Page, api: ArtificialFlowApi, uatCa
   await api.waitForInstanceStatus(instance.id, (item) => activeSteps(item).includes("reviewerApproval"));
   const reviewerApprovalExecution = activeExecutionForStep(await api.getInstance(instance.id), "reviewerApproval");
 
-  await assertInboxCannotSeeOrClaimTask(page, api, inboxToken, actingUserForRole(accountant), instance.id, reviewerApprovalExecution.id, "reviewerApproval");
+  await assertEndUserDoesNotSeeTask(page, api, clientToken, endUserForRole(accountant), instance.id, reviewerApprovalExecution.id, "reviewerApproval");
 
-  await completeTaskFromInbox(page, api, inboxToken, actingUserForRole(reviewer), instance.id, "reviewerApproval", "Reviewer takes and completes reviewerApproval through ArtificialFlow Transaction Inbox");
+  await completeTaskForEndUser(page, api, clientToken, endUserForRole(reviewer), instance.id, "reviewerApproval", "Client app finds, claims and completes reviewerApproval for the reviewer");
 
   const completed = await api.waitForInstanceStatus(instance.id, (item) => item.status === "COMPLETED");
   expect(completed.status).toBe("COMPLETED");
@@ -199,11 +182,9 @@ async function runIamModeCase(page: Page, api: ArtificialFlowApi, mode: UatDeplo
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addBanner(page, `IAM mode validated: ${String(config.deployment_mode || mode)}`);
   await expect(page.getByText("Dashboard").first()).toBeVisible();
-  if (mode === "bundled-zitadel") {
-    await page.goto("/identity", { waitUntil: "domcontentloaded" });
-    await addBanner(page, "Bundled ZITADEL admin identity management is visible");
-    await expect(page.locator("body")).toContainText(/Identity|Users|Roles|Clients/i);
-  }
+  await page.goto("/identity", { waitUntil: "domcontentloaded" });
+  await addBanner(page, "Identity is managed in the external OIDC provider");
+  await expect(page.locator("body")).toContainText(/OIDC|Identity|provider/i);
 }
 
 async function runDashboardCase(page: Page): Promise<void> {
@@ -347,110 +328,8 @@ async function runWorkerGuardrailCase(page: Page, api: ArtificialFlowApi): Promi
   }, deployment, `Capabilities: ${capabilities.capabilities.join(", ")}\nUnsupported protocol rejected with HTTP ${unsupported.status}`);
 }
 
-async function runBundledIdentityManagementCase(page: Page, api: ArtificialFlowApi, created: Created): Promise<void> {
-  const users = await api.identityUsers();
-  const roles = await api.identityRoles();
-  expect(users.length).toBeGreaterThan(0);
-  expect(roles.length).toBeGreaterThan(0);
-  const first = await createBundledSDKProfile(api, `uat-video-${runId}`, created);
-  const sdk = new NodeSDKClient({
-    baseUrl: `${process.env.FRONTEND_URL || "http://localhost:9100"}/api`,
-    auth: { type: "zitadel-jwt-profile", profile: first.profile },
-  });
-  const sdkIdentity = await sdk.getIdentity();
-  expect(sdkIdentity.authenticated).toBe(true);
-  expect(sdkIdentity.principal?.roles || []).toContain("artificialflow client");
-  const sdkJobs = await sdk.activateJobs({
-    type: "uat-sdk-auth-no-jobs",
-    worker: `uat-official-sdk-${runId}`,
-    maxJobs: 1,
-    timeoutMs: 10,
-    lockDurationMs: 1_000,
-  });
-  expect(Array.isArray(sdkJobs.jobs)).toBe(true);
-
-  const replacementKeyPair = await generateServiceAccountKeyPair();
-  const replacementKey = await api.addClientKey(first.clientId, replacementKeyPair.publicKeyPem);
-  const replacementProfile = createServiceAccountProfile({
-    keyId: replacementKey.id,
-    userId: first.clientId,
-    issuer: first.profile.issuer,
-    tokenUrl: first.profile.tokenUrl,
-    scopes: first.profile.scopes,
-  }, replacementKeyPair.privateKeyPem) as ZitadelJwtProfile;
-  const replacementSDK = new NodeSDKClient({
-    baseUrl: `${process.env.FRONTEND_URL || "http://localhost:9100"}/api`,
-    auth: { type: "zitadel-jwt-profile", profile: replacementProfile },
-  });
-  expect((await replacementSDK.getIdentity()).authenticated).toBe(true);
-  expect((await sdk.getIdentity()).authenticated).toBe(true);
-
-  const firstProvider = new ZitadelJwtProfileAuthProvider({ type: "zitadel-jwt-profile", profile: first.profile });
-  const mintedBeforeRevocation = await firstProvider.getToken();
-  const accessClaims = JSON.parse(Buffer.from(mintedBeforeRevocation.split(".")[1] || "", "base64url").toString("utf8")) as {
-    aud?: string | string[];
-    iat?: number;
-    exp?: number;
-  };
-  expect(accessClaims.exp).toBeGreaterThan(accessClaims.iat || 0);
-  expect((accessClaims.exp || 0) - (accessClaims.iat || 0)).toBeLessThanOrEqual(900);
-  expect(Array.isArray(accessClaims.aud) ? accessClaims.aud : [accessClaims.aud]).toContain(first.projectId);
-  await api.revokeClientKey(first.clientId, first.keyId);
-  await expect(new NodeSDKClient({
-    baseUrl: `${process.env.FRONTEND_URL || "http://localhost:9100"}/api`,
-    auth: { type: "zitadel-jwt-profile", profile: first.profile },
-  }).getIdentity()).rejects.toThrow();
-  expect((await api.requestWithToken<{ authenticated: boolean }>("/identity/me", mintedBeforeRevocation)).authenticated).toBe(true);
-
-  const replacementAccessToken = await new ZitadelJwtProfileAuthProvider({
-    type: "zitadel-jwt-profile",
-    profile: replacementProfile,
-  }).getToken();
-  await api.terminateIdentityUser(first.clientId);
-  await api.requestWithToken("/identity/me", replacementAccessToken, {}, 401);
-  await api.deleteClient(first.clientId);
-  created.clients = created.clients.filter((id) => id !== first.clientId);
-
-  await page.goto("/sdk-clients", { waitUntil: "domcontentloaded" });
-  await addBanner(page, "Private-key JWT Profile mints short-lived tokens with overlapping key rotation");
-  await expect(page.locator("body")).toContainText(/SDK Clients|ArtificialFlow Clients|Clients/i);
-}
-
-async function createBundledSDKProfile(api: ArtificialFlowApi, name: string, created: Created) {
-  const keyPair = await generateServiceAccountKeyPair();
-  const client = await api.createClientKey(name, keyPair.publicKeyPem);
-  const key = client.credentials.find((credential) => credential.type === "private_key_jwt");
-  expect(key, "ZITADEL must return registered public-key metadata").toBeTruthy();
-  const config = await api.identityConfig();
-  const issuer = String(config.frontend_oidc_authority || "").replace(/\/+$/, "");
-  const projectId = String(config.client_id || "");
-  expect(issuer).not.toBe("");
-  expect(projectId).not.toBe("");
-  created.clients.push(client.client_id);
-  const profile = createServiceAccountProfile({
-    keyId: key?.id || "",
-    userId: client.client_id,
-    issuer,
-    tokenUrl: `${issuer}/oauth/v2/token`,
-    scopes: [
-      "openid",
-      "urn:zitadel:iam:org:projects:roles",
-      `urn:zitadel:iam:org:project:id:${projectId}:aud`,
-    ],
-  }, keyPair.privateKeyPem) as ZitadelJwtProfile;
-  return { clientId: client.client_id, keyId: key?.id || "", profile, projectId };
-}
-
-function roleUser(role: "accountant" | "reviewer", mode: UatDeployment) {
+function roleUser(role: "accountant" | "reviewer", _mode: UatDeployment) {
   const password = "UatPass123!";
-  if (mode === "external-keycloak") {
-    return {
-      role,
-      username: role,
-      password,
-      display: role === "accountant" ? "UAT Accountant" : "UAT Reviewer",
-    };
-  }
   return {
     role,
     username: role,
@@ -459,62 +338,19 @@ function roleUser(role: "accountant" | "reviewer", mode: UatDeployment) {
   };
 }
 
-async function provisionRoleUsers(
-  api: ArtificialFlowApi,
-  mode: UatDeployment,
-  accountant: ReturnType<typeof roleUser>,
-  reviewer: ReturnType<typeof roleUser>,
-  created: Created,
-): Promise<void> {
-  if (mode === "external-keycloak") {
-    return;
-  }
-
-  for (const role of [accountant.role, reviewer.role]) {
-    try {
-      await api.createIdentityRole(role, `UAT ${role}`, "UAT");
-      created.roles.push(role);
-    } catch (err) {
-      console.log(`[uat-role] role ${role} already exists or could not be created: ${String(err)}`);
-    }
-  }
-
-  for (const user of [accountant, reviewer]) {
-    try {
-      const createdUser = await api.createIdentityUser({
-        username: user.username,
-        given_name: user.display.split(" ")[1] || user.role,
-        family_name: "User",
-        email: `${user.username}@artificialflow.io`,
-        password: user.password,
-        roles: [user.role],
-      });
-      created.users.push(createdUser.id);
-    } catch (err) {
-      console.log(`[uat-role] user ${user.username} already exists or could not be created: ${String(err)}`);
-    }
-  }
+async function provisionRoleUsers(): Promise<void> {
+  // Role users live in the external OIDC provider.
 }
 
-function actingUserForRole(user: ReturnType<typeof roleUser>): ActingUser {
+function endUserForRole(user: ReturnType<typeof roleUser>): EndUser {
   return {
-    subject: user.username,
     username: user.username,
     email: `${user.username}@artificialflow.io`,
-    name: user.display,
-    roles: [user.role],
+    groups: [user.role],
   };
 }
 
-async function provisionInboxClientToken(page: Page, api: ArtificialFlowApi, mode: UatDeployment, created: Created): Promise<string> {
-  if (mode === "bundled-zitadel") {
-    const client = await createBundledSDKProfile(api, `uat-inbox-${runId}`, created);
-    return new ZitadelJwtProfileAuthProvider({
-      type: "zitadel-jwt-profile",
-      profile: client.profile,
-    }).getToken();
-  }
-
+async function provisionClientToken(page: Page, _api: ArtificialFlowApi, _mode: UatDeployment, _created: Created): Promise<string> {
   const tokenResponse = await page.request.post("http://localhost:9181/realms/artificialflow/protocol/openid-connect/token", {
     form: {
       grant_type: "password",
@@ -569,46 +405,50 @@ async function completeWorkerJob(page: Page, api: ArtificialFlowApi, type: strin
   await api.completeJob(jobs[0].key, worker, { workerValidated: true });
 }
 
-async function completeTaskFromInbox(
+function tasksForEndUser(api: ArtificialFlowApi, token: string, user: EndUser, instanceId: string) {
+  return api.searchTasks(token, {
+    candidateUser: user.email,
+    candidateGroups: [user.username, ...user.groups],
+    processInstanceKey: instanceId,
+  });
+}
+
+async function completeTaskForEndUser(
   page: Page,
   api: ArtificialFlowApi,
   token: string,
-  actingUser: ActingUser,
+  user: EndUser,
   instanceId: string,
   stepId: string,
   banner: string,
 ): Promise<void> {
   await page.goto(`/instances/${instanceId}`, { waitUntil: "domcontentloaded" });
   await addBanner(page, banner);
-  const inboxInstance = await api.getInboxInstance(instanceId, token, actingUser);
-  expect(inboxInstance.id).toBe(instanceId);
-  const tasks = await api.listInboxTasks(instanceId, token, actingUser);
+  const tasks = await tasksForEndUser(api, token, user, instanceId);
   const task = tasks.find((item) => item.elementId === stepId);
-  expect(task, `${actingUser.username} should see ${stepId} in ArtificialFlow Transaction Inbox`).toBeTruthy();
+  expect(task, `${user.username} should have ${stepId} pending`).toBeTruthy();
   if (!task) {
-    throw new Error(`${actingUser.username} could not see ${stepId} in ArtificialFlow Transaction Inbox`);
+    throw new Error(`${user.username} has no pending ${stepId}`);
   }
-  expect(task.canClaim || task.canComplete).toBeTruthy();
-  const claimed = task.canClaim ? await api.claimInboxTask(instanceId, task.executionId, token, actingUser) : task;
-  const executionId = typeof claimed === "string" ? task.executionId : claimed.executionId;
-  await api.completeInboxTask(instanceId, executionId, token, actingUser);
+  if (task.canClaim) {
+    await api.claimTaskFor(instanceId, task.executionId, token, user.email);
+  }
+  await api.completeTaskFor(instanceId, task.executionId, token, user.email);
 }
 
-async function assertInboxCannotSeeOrClaimTask(
+async function assertEndUserDoesNotSeeTask(
   page: Page,
   api: ArtificialFlowApi,
   token: string,
-  actingUser: ActingUser,
+  user: EndUser,
   instanceId: string,
-  executionId: string,
+  _executionId: string,
   stepId: string,
 ): Promise<void> {
   await page.goto("/instances", { waitUntil: "domcontentloaded" });
-  await addBanner(page, `${stepId}: ${actingUser.username} cannot take a task assigned to another role`);
-  const inboxItems = await api.listInboxItems(token, actingUser);
-  const inboxTasks = await api.listInboxTasks(instanceId, token, actingUser).catch(() => []);
-  expect(inboxItems.some((item) => item.id === instanceId && inboxTasks.some((task) => task.elementId === stepId))).toBeFalsy();
-  await api.claimInboxTask(instanceId, executionId, token, actingUser, 403);
+  await addBanner(page, `${stepId}: not pending for ${user.username}, whose groups do not match`);
+  const tasks = await tasksForEndUser(api, token, user, instanceId);
+  expect(tasks.some((task) => task.elementId === stepId)).toBeFalsy();
 }
 
 async function showCompletedHistoryEvidence(page: Page, instanceId: string): Promise<void> {
@@ -757,15 +597,6 @@ async function cleanup(api: ArtificialFlowApi, created: Created): Promise<void> 
     console.log("[uat-cleanup] preserving created UAT evidence because UAT_KEEP_EVIDENCE=true");
     return;
   }
-  for (const userId of created.users.reverse()) {
-    await api.deleteIdentityUser(userId).catch(() => undefined);
-  }
-  for (const role of created.roles.reverse()) {
-    await api.deleteIdentityRole(role).catch(() => undefined);
-  }
-  for (const clientId of created.clients.reverse()) {
-    await api.deleteClient(clientId).catch(() => undefined);
-  }
   for (const instanceId of created.instances.reverse()) {
     await api.deleteInstance(instanceId).catch(() => undefined);
   }
@@ -787,7 +618,4 @@ function escapeHtml(value: string): string {
 interface Created {
   workflows: string[];
   instances: string[];
-  clients: string[];
-  users: string[];
-  roles: string[];
 }

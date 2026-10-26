@@ -28,8 +28,8 @@ func NewHandler(service *application.QueryService) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(r *mux.Router) {
-	instanceRead := auth.RequireAnyRole(auth.RoleArtificialFlowAdmin, auth.RoleArtificialFlowClient)
-	workflowRead := auth.RequireAnyRole(auth.RoleArtificialFlowAdmin, auth.RoleArtificialFlowModeler, auth.RoleArtificialFlowClient)
+	instanceRead := auth.RequireAnyRole(auth.RoleAdmin, auth.RoleClient)
+	workflowRead := auth.RequireAnyRole(auth.RoleAdmin, auth.RoleBusiness, auth.RoleClient)
 
 	r.Handle("/instances", instanceRead(http.HandlerFunc(h.searchInstances))).Methods("GET")
 	r.Handle("/instances/{id}", instanceRead(http.HandlerFunc(h.getInstance))).Methods("GET")
@@ -139,7 +139,7 @@ func (h *Handler) searchInstances(w http.ResponseWriter, r *http.Request) {
 
 func canReadProjectedInstances(r *http.Request) bool {
 	principal, ok := auth.PrincipalFromContext(r.Context())
-	return ok && principal.HasAnyRole(auth.RoleArtificialFlowAdmin, auth.RoleArtificialFlowClient)
+	return ok && principal.HasAnyRole(auth.RoleAdmin, auth.RoleClient)
 }
 
 func normalizeInstanceStateFilter(state string) string {

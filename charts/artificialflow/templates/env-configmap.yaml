@@ -1,55 +1,5 @@
 {{- include "artificialflow.validateValues" . -}}
-{{- $internalIssuer := .Values.iam.auth.issuerInternalUrl -}}
-{{- if and (eq .Values.iam.mode "zitadel") (not $internalIssuer) -}}
-{{- $internalIssuer = include "artificialflow.zitadelApiUrl" . -}}
-{{- end -}}
-{{- $publicIssuer := .Values.iam.auth.issuerPublicUrl -}}
-{{- if and (eq .Values.iam.mode "zitadel") (not $publicIssuer) -}}
-{{- $publicIssuer = .Values.zitadel.publicUrl -}}
-{{- end -}}
-{{- $frontendAuthority := .Values.iam.frontend.oidcAuthority -}}
-{{- $applicationBootstrapPath := include "artificialflow.applicationBootstrapPath" . -}}
-{{- $applicationAuthPath := include "artificialflow.applicationAuthPath" . -}}
-{{- $applicationStatePrefix := .Values.applicationState.filePrefix -}}
-{{- if and (eq .Values.iam.mode "zitadel") (not $frontendAuthority) -}}
-{{- $frontendAuthority = .Values.zitadel.publicUrl -}}
-{{- end -}}
-{{- $frontendClientIDFile := .Values.iam.frontend.oidcClientIdFile -}}
-{{- if and (eq .Values.iam.mode "zitadel") (not $frontendClientIDFile) -}}
-{{- $frontendClientIDFile = printf "%s/%s-frontend-client-id" $applicationBootstrapPath $applicationStatePrefix -}}
-{{- end -}}
-{{- if and .Values.compatibility.legacyResourceNames.enabled (eq .Values.iam.mode "zitadel") -}}
-{{- with .Values.compatibility.legacyBundledIAM.issuerInternalUrl -}}
-{{- $internalIssuer = . -}}
-{{- end -}}
-{{- with .Values.compatibility.legacyBundledIAM.issuerPublicUrl -}}
-{{- $publicIssuer = . -}}
-{{- end -}}
-{{- with .Values.compatibility.legacyBundledIAM.frontendAuthority -}}
-{{- $frontendAuthority = . -}}
-{{- end -}}
-{{- with .Values.compatibility.legacyBundledIAM.frontendClientIdFile -}}
-{{- $frontendClientIDFile = . -}}
-{{- end -}}
-{{- end -}}
-{{- $tokenMode := .Values.iam.auth.tokenMode -}}
-{{- $clientID := .Values.iam.auth.clientId -}}
-{{- $clientIDFile := "" -}}
-{{- $enforceAudience := .Values.iam.auth.enforceAudience -}}
-{{- $introspectionURL := .Values.iam.auth.introspectionUrl -}}
-{{- $introspectionClientIDFile := "" -}}
-{{- $introspectionClientSecretFile := "" -}}
-{{- if and (eq .Values.iam.mode "zitadel") .Values.zitadel.enabled -}}
-{{- $tokenMode = "introspection" -}}
-{{- if not $introspectionURL -}}
-{{- $introspectionURL = printf "%s/oauth/v2/introspect" (include "artificialflow.zitadelApiUrl" .) -}}
-{{- end -}}
-{{- $introspectionClientIDFile = printf "%s/%s-api-client-id" $applicationAuthPath $applicationStatePrefix -}}
-{{- $introspectionClientSecretFile = printf "%s/%s-api-client-secret" $applicationAuthPath $applicationStatePrefix -}}
-{{- $clientID = "" -}}
-{{- $clientIDFile = printf "%s/%s-project-id" $applicationBootstrapPath $applicationStatePrefix -}}
-{{- $enforceAudience = true -}}
-{{- end -}}
+{{- $v := .Values -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -57,91 +7,32 @@ metadata:
   labels:
     {{- include "artificialflow.labels" . | nindent 4 }}
 data:
-  LOG_LEVEL: "INFO"
-  IAM_DEPLOYMENT_MODE: {{ .Values.iam.mode | quote }}
-  IAM_PROVIDER_NAME: {{ .Values.iam.providerName | quote }}
-  AUTH_ISSUER_INTERNAL_URL: {{ $internalIssuer | quote }}
-  AUTH_ISSUER_PUBLIC_URL: {{ $publicIssuer | quote }}
-  AUTH_CLIENT_ID: {{ $clientID | quote }}
-  AUTH_CLIENT_ID_FILE: {{ $clientIDFile | quote }}
-  AUTH_CLIENT_ID_FILE_TIMEOUT_SECONDS: {{ .Values.zitadel.bootstrap.waitSeconds | quote }}
-  AUTH_TOKEN_MODE: {{ $tokenMode | quote }}
-  AUTH_INTROSPECTION_URL: {{ $introspectionURL | quote }}
-  AUTH_INTROSPECTION_CLIENT_ID: {{ .Values.iam.auth.introspectionClientId | quote }}
-  AUTH_INTROSPECTION_CLIENT_ID_FILE: {{ $introspectionClientIDFile | quote }}
-  AUTH_INTROSPECTION_CLIENT_SECRET_FILE: {{ $introspectionClientSecretFile | quote }}
-  AUTH_INTROSPECTION_CREDENTIAL_FILE_TIMEOUT_SECONDS: {{ .Values.zitadel.bootstrap.waitSeconds | quote }}
-  AUTH_INTROSPECTION_AUTH_METHOD: {{ .Values.iam.auth.introspectionAuthMethod | quote }}
-  AUTH_CLAIM_SUBJECT_PATH: {{ .Values.iam.auth.claimSubjectPath | quote }}
-  AUTH_CLAIM_ROLES_PATH: {{ .Values.iam.auth.claimRolesPath | quote }}
-  AUTH_CLAIM_SCOPES_PATH: {{ .Values.iam.auth.claimScopesPath | quote }}
-  AUTH_CLAIM_TENANT_PATH: {{ .Values.iam.auth.claimTenantPath | quote }}
-  AUTH_CLAIM_EMAIL_PATH: {{ .Values.iam.auth.claimEmailPath | quote }}
-  AUTH_CLAIM_NAME_PATH: {{ .Values.iam.auth.claimNamePath | quote }}
-  AUTH_ENFORCE_AUDIENCE: {{ $enforceAudience | quote }}
-  AUTH_ALLOW_INSECURE_ISSUER: {{ .Values.iam.auth.allowInsecureIssuer | quote }}
-  FRONTEND_AUTH_OIDC_AUTHORITY: {{ $frontendAuthority | quote }}
-  FRONTEND_AUTH_OIDC_CLIENT_ID: {{ .Values.iam.frontend.oidcClientId | quote }}
-  FRONTEND_AUTH_OIDC_CLIENT_ID_FILE: {{ $frontendClientIDFile | quote }}
-  FRONTEND_AUTH_OIDC_CLIENT_ID_FILE_TIMEOUT_SECONDS: {{ .Values.frontend.env.oidcClientIdFileTimeoutSeconds | quote }}
-  ARTIFICIALFLOW_API_URL: {{ .Values.frontend.env.apiUrl | quote }}
-  ARTIFICIALFLOW_OIDC_AUTHORITY: {{ $frontendAuthority | quote }}
-  ARTIFICIALFLOW_OIDC_CLIENT_ID: {{ .Values.iam.frontend.oidcClientId | quote }}
-  ARTIFICIALFLOW_OIDC_CLIENT_ID_FILE: {{ $frontendClientIDFile | quote }}
-  ARTIFICIALFLOW_OIDC_CLIENT_ID_FILE_TIMEOUT_SECONDS: {{ .Values.frontend.env.oidcClientIdFileTimeoutSeconds | quote }}
-  VITE_API_URL: {{ .Values.frontend.env.apiUrl | quote }}
-  VITE_OIDC_AUTHORITY: {{ $frontendAuthority | quote }}
-  VITE_OIDC_CLIENT_ID: {{ .Values.iam.frontend.oidcClientId | quote }}
-  SERVER_ADDR: {{ .Values.command.env.serverAddr | quote }}
-  QUERY_SERVER_ADDR: {{ .Values.query.env.serverAddr | quote }}
-  RUNTIME_ENABLED: {{ .Values.command.env.runtimeEnabled | quote }}
-  OUTBOX_RELAY_ENABLED: {{ .Values.command.env.outboxRelayEnabled | quote }}
-  OUTBOX_RELAY_INTERVAL: {{ .Values.command.env.outboxRelayInterval | quote }}
-  OUTBOX_RELAY_TIMEOUT: {{ .Values.command.env.outboxRelayTimeout | quote }}
-  OUTBOX_RELAY_BATCH_SIZE: {{ .Values.command.env.outboxRelayBatchSize | quote }}
-  OUTBOX_RELAY_MAX_ATTEMPTS: {{ .Values.command.env.outboxRelayMaxAttempts | quote }}
-  IDEMPOTENCY_CLEANUP_ENABLED: {{ .Values.command.env.idempotencyCleanupEnabled | quote }}
-  IDEMPOTENCY_RETENTION: {{ .Values.command.env.idempotencyRetention | quote }}
-  IDEMPOTENCY_CLEANUP_INTERVAL: {{ .Values.command.env.idempotencyCleanupInterval | quote }}
-  IDEMPOTENCY_CLEANUP_TIMEOUT: {{ .Values.command.env.idempotencyCleanupTimeout | quote }}
-  IDEMPOTENCY_CLEANUP_BATCH_SIZE: {{ .Values.command.env.idempotencyCleanupBatchSize | quote }}
-  RUNTIME_TICK_INTERVAL: {{ .Values.runtime.env.tickInterval | quote }}
-  RUNTIME_TASK_TIMEOUT: {{ .Values.runtime.env.taskTimeout | quote }}
-  RUNTIME_LEASE_TTL: {{ .Values.runtime.env.leaseTTL | default "15s" | quote }}
-  ES_ADDR: {{ .Values.search.address | quote }}
-  SEARCH_BACKEND: {{ .Values.search.backend | quote }}
-  ES_INDEX_PREFIX: {{ .Values.search.indexPrefix | quote }}
-  EVENT_BUS_TYPE: {{ .Values.eventBus.type | quote }}
-  KAFKA_BROKERS: {{ .Values.eventBus.kafka.brokers | quote }}
-  KAFKA_TOPIC_EVENTS: {{ .Values.eventBus.kafka.eventTopic | quote }}
-  NATS_URL: {{ .Values.eventBus.nats.url | quote }}
-  KAFKA_GROUP_ID: {{ .Values.syncWorker.env.groupId | quote }}
-  KAFKA_TOPICS: {{ .Values.syncWorker.env.topics | quote }}
-  SYNC_PROJECTION_CONTRACT: {{ .Values.syncWorker.env.projectionContract | quote }}
-  KAFKA_DLQ_TOPIC: {{ .Values.syncWorker.env.dlqTopic | quote }}
-  CONNECT_BOOTSTRAP_ENABLED: {{ .Values.syncWorker.env.connectBootstrapEnabled | quote }}
-  CONNECT_URL: {{ .Values.syncWorker.env.connectUrl | quote }}
-  CONNECTOR_NAME: {{ .Values.syncWorker.env.connectorName | quote }}
-  CONNECTOR_TOPIC_PREFIX: {{ .Values.syncWorker.env.connectorTopicPrefix | quote }}
-  CONNECTOR_SLOT_NAME: {{ .Values.syncWorker.env.connectorSlotName | quote }}
-  CONNECTOR_DATABASE_USER: {{ .Values.syncWorker.env.connectorDatabaseUser | quote }}
-  CONNECTOR_FILE: {{ .Values.syncWorker.env.connectorFile | quote }}
-  CONNECTOR_JSON: {{ .Values.syncWorker.env.connectorJson | quote }}
-  CONNECT_ALLOW_PARALLEL_IDENTIFIERS: {{ .Values.syncWorker.env.allowParallelConnectors | quote }}
-  CONNECT_WAIT_TIMEOUT_SEC: {{ .Values.syncWorker.env.connectWaitTimeoutSec | quote }}
-  SYNC_MAX_PROCESS_RETRIES: {{ .Values.syncWorker.env.maxProcessRetries | quote }}
-  SYNC_RETRY_BACKOFF: {{ .Values.syncWorker.env.retryBackoff | quote }}
-  SYNC_METRICS_ADDR: {{ .Values.syncWorker.env.metricsAddr | quote }}
-  SYNC_FRESHNESS_SLO_SEC: {{ .Values.syncWorker.env.freshnessSloSec | quote }}
-  SYNC_HEALTH_FAIL_ON_STALE: {{ .Values.syncWorker.env.healthFailOnStale | quote }}
-  SYNC_ALLOW_MIXED_DEBEZIUM_PREFIXES: {{ .Values.syncWorker.env.allowMixedDebeziumPrefixes | quote }}
-  ALLOWED_ORIGINS: {{ .Values.cors.allowedOrigins | quote }}
-  CORS_ALLOW_CREDENTIALS: {{ .Values.cors.allowCredentials | quote }}
-  ZITADEL_MANAGEMENT_URL: {{ ternary (include "artificialflow.zitadelApiUrl" .) "" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ZITADEL_PUBLIC_HOST: {{ ternary .Values.zitadel.externalDomain "" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ZITADEL_OWNER_PAT_FILE: {{ ternary "/zitadel/bootstrap/owner.pat" "" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ARTIFICIALFLOW_ZITADEL_BOOTSTRAP_STATE_FILE: {{ ternary (include "artificialflow.applicationStateFile" .) "" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ARTIFICIALFLOW_IAM_CLIENT_KEY_DEFAULT_LIFETIME: {{ ternary (toString .Values.zitadel.bootstrap.clientKeyDefaultLifetime) "2160h" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ARTIFICIALFLOW_IAM_CLIENT_KEY_MAX_LIFETIME: {{ ternary (toString .Values.zitadel.bootstrap.clientKeyMaxLifetime) "8760h" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ARTIFICIALFLOW_IAM_ENABLE_LEGACY_PAT_CREATION: {{ ternary (toString .Values.zitadel.bootstrap.enableLegacyPatCreation) "false" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
-  ARTIFICIALFLOW_IAM_ENABLE_LEGACY_PAT_ROTATION: {{ ternary (toString .Values.zitadel.bootstrap.enableLegacyPatRotation) "false" (and .Values.zitadel.enabled (eq .Values.iam.mode "zitadel")) | quote }}
+  IAM_DEPLOYMENT_MODE: {{ $v.iam.mode | quote }}
+  {{- if $v.iam.mode }}
+  IAM_PROVIDER_NAME: {{ $v.iam.providerName | quote }}
+  AUTH_ISSUER_INTERNAL_URL: {{ $v.iam.auth.issuerInternalUrl | quote }}
+  AUTH_ISSUER_PUBLIC_URL: {{ $v.iam.auth.issuerPublicUrl | quote }}
+  AUTH_CLIENT_ID: {{ $v.iam.auth.clientId | quote }}
+  AUTH_CLAIM_ROLES_PATH: {{ $v.iam.auth.claimRolesPath | quote }}
+  AUTH_TOKEN_MODE: {{ $v.iam.auth.tokenMode | quote }}
+  AUTH_INTROSPECTION_URL: {{ $v.iam.auth.introspectionUrl | quote }}
+  AUTH_INTROSPECTION_CLIENT_ID: {{ $v.iam.auth.introspectionClientId | quote }}
+  FRONTEND_AUTH_OIDC_AUTHORITY: {{ $v.iam.frontend.oidcAuthority | default $v.iam.auth.issuerPublicUrl | quote }}
+  FRONTEND_AUTH_OIDC_CLIENT_ID: {{ $v.iam.frontend.oidcClientId | quote }}
+  {{- end }}
+  AUTH_PRODUCTION: {{ and $v.iam.mode $v.iam.auth.production | quote }}
+  ALLOWED_ORIGINS: {{ $v.cors.allowedOrigins | quote }}
+  CORS_ALLOW_CREDENTIALS: {{ $v.cors.allowCredentials | quote }}
+  ES_ADDR: {{ include "artificialflow.searchAddress" . | quote }}
+  KAFKA_BROKERS: {{ include "artificialflow.kafkaBrokers" . | quote }}
+  KAFKA_TOPIC_EVENTS: workflow.events.v1
+  KAFKA_TOPIC_PARTITIONS: {{ $v.kafka.topicPartitions | quote }}
+  KAFKA_TOPICS: workflow.events.v1,artificialflow.public.process,artificialflow.public.process_instance,artificialflow.public.element_instance,artificialflow.public.variable,artificialflow.public.job,artificialflow.public.incident,artificialflow.public.timer,artificialflow.public.message_subscription
+  CONNECT_URL: {{ include "artificialflow.connectUrl" . | quote }}
+  CONNECTOR_DATABASE_HOSTNAME: {{ include "artificialflow.postgresHost" . | quote }}
+  CONNECTOR_DATABASE_PORT: {{ $v.postgresql.port | quote }}
+  CONNECTOR_DATABASE_NAME: {{ $v.postgresql.database | quote }}
+  CONNECTOR_DATABASE_USER: {{ $v.postgresql.user | quote }}
+  {{- range $key, $value := $v.env }}
+  {{ $key }}: {{ toString $value | quote }}
+  {{- end }}

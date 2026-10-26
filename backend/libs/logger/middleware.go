@@ -60,8 +60,10 @@ func (m *HTTPMiddleware) Middleware(next http.Handler) http.Handler {
 			statusCode:     http.StatusOK,
 		}
 
-		// Log request start
-		m.log.Info(ctx, "request started", map[string]any{
+		// Successful requests are high-cardinality hot-path telemetry. Keep
+		// their details available at debug level and use metrics for aggregate
+		// latency/throughput; warning and error responses remain prominent.
+		m.log.Debug(ctx, "request started", map[string]any{
 			"method":      r.Method,
 			"path":        r.URL.Path,
 			"query":       r.URL.RawQuery,
@@ -96,7 +98,7 @@ func (m *HTTPMiddleware) Middleware(next http.Handler) http.Handler {
 		case LevelWarn:
 			m.log.Warn(ctx, "request completed", fields)
 		default:
-			m.log.Info(ctx, "request completed", fields)
+			m.log.Debug(ctx, "request completed", fields)
 		}
 	})
 }

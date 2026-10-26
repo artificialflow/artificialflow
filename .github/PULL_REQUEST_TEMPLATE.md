@@ -34,7 +34,7 @@ Use this section when relevant:
 - Backend/runtime: `make test-unit`, plus `make test-bpmn-matrix` for BPMN behavior.
 - Frontend: `make test-frontend`, plus build/lint evidence from CI.
 - SDK: `npm --prefix clients/nodejs-sdk test`, package validation, and `npm pack --dry-run`.
-- Deployment: `make smoke-profiles`, `make smoke-release-profiles`, `make validate-helm`.
+- Deployment: `make smoke`, `make smoke-release`, `make validate-helm`.
 - Worker API: `make worker-conformance`.
 - CQRS/query/sync: `make cqrs-e2e-smoke` and `make cqrs-parity-check` when infrastructure behavior changes.
 - Security-sensitive: `make test-security` and Security workflow review.

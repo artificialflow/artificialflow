@@ -1,0 +1,10 @@
+{{- $components := include "artificialflow.components" . | fromYaml }}
+{{- if hasKey $components "Error" }}
+{{- fail (printf "artificialflow.components rendered invalid YAML: %s" $components.Error) }}
+{{- end }}
+{{- range $component, $spec := $components }}
+{{- if $spec.enabled }}
+---
+{{ include "artificialflow.workload" (dict "root" $ "component" $component "spec" $spec) }}
+{{- end }}
+{{- end }}

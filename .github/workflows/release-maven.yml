@@ -1,0 +1,106 @@
+name: Release Maven SDK
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag that must match the package version
+        required: true
+        type: string
+      publish:
+        description: Publish to Maven Central instead of running validation only
+        required: true
+        type: boolean
+      images_verified:
+        description: The required image reusable workflow completed successfully
+        required: true
+        type: boolean
+    secrets:
+      MAVEN_CENTRAL_USERNAME:
+        required: false
+      MAVEN_CENTRAL_PASSWORD:
+        required: false
+      MAVEN_GPG_PRIVATE_KEY:
+        required: false
+      MAVEN_GPG_PASSPHRASE:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to validate
+        required: true
+        default: v1.2.0
+      publish:
+        description: Direct publication is refused; use the Release orchestrator
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-maven-${{ inputs.tag }}-${{ inputs.publish }}
+  cancel-in-progress: false
+
+jobs:
+  release-preflight:
+    name: Validate release identity and orchestration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse Maven publication without completed image workflow
+        if: ${{ inputs.publish && !inputs.images_verified }}
+        run: |
+          echo "Maven publication must run through .github/workflows/release.yml after the image workflow succeeds" >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+
+      - name: Validate branding, version, and publication order
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          node scripts/validate_legacy_branding.mjs
+          node scripts/validate_release_version.mjs
+          node scripts/validate_release_workflows.mjs
+
+  publish-java-sdk:
+    name: Publish io.artificialflow:artificialflow-sdk
+    needs: release-preflight
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/java-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          server-id: ossrh
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Verify
+        run: mvn -B verify
+
+      - name: Publish
+        if: ${{ inputs.publish }}
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: mvn -B -DskipTests deploy

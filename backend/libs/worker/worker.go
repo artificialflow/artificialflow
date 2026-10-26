@@ -6,6 +6,11 @@ import (
 	"fmt"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type JobHandler func(ctx context.Context, job model.Job) (map[string]any, error)
@@ -128,11 +133,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 }
 
 func (w *Worker) processJob(ctx context.Context, job model.Job) error {
-	jobCtx := ctx
+	jobCtx, span := otel.Tracer("artificialflow/worker").Start(ctx, "worker.process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(attribute.String("artificialflow.job.type", w.jobType)))
+	defer span.End()
 	stopLockRenewer := func() error { return nil }
 
 	if w.lockRenewInterval > 0 {
-		renewCtx, cancelRenew := context.WithCancel(ctx)
+		renewCtx, cancelRenew := context.WithCancel(jobCtx)
 		jobCtx = renewCtx
 		stopLockRenewer = w.startLockRenewer(renewCtx, cancelRenew, job)
 	}
@@ -140,20 +148,24 @@ func (w *Worker) processJob(ctx context.Context, job model.Job) error {
 	variables, handlerErr := w.handler(jobCtx, job)
 	lockRenewErr := stopLockRenewer()
 	if lockRenewErr != nil {
+		span.RecordError(lockRenewErr)
+		span.SetStatus(codes.Error, "lock renewal failed")
 		return lockRenewErr
 	}
 
 	if handlerErr != nil {
+		span.RecordError(handlerErr)
+		span.SetStatus(codes.Error, "job handler failed")
 		if errors.Is(handlerErr, context.Canceled) || errors.Is(handlerErr, context.DeadlineExceeded) {
 			return handlerErr
 		}
-		return w.client.FailJob(ctx, job.Key, FailJobRequest{
+		return w.client.FailJob(context.WithoutCancel(jobCtx), job.Key, FailJobRequest{
 			Worker:       w.workerName,
 			ErrorMessage: handlerErr.Error(),
 		})
 	}
 
-	return w.client.CompleteJob(ctx, job.Key, CompleteJobRequest{
+	return w.client.CompleteJob(context.WithoutCancel(jobCtx), job.Key, CompleteJobRequest{
 		Worker:    w.workerName,
 		Variables: variables,
 	})

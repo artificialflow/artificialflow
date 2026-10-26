@@ -6,6 +6,12 @@ locks for external jobs.
 For the full HTTP contract (headers, request/response JSON, idempotency rules,
 and a language-agnostic worker loop), see **[API.md — Worker / jobs API](API.md#worker--jobs-api)**.
 
+## Authentication
+
+With `IAM_DEPLOYMENT_MODE=true`, workers send `Authorization: Bearer <token>`
+from a machine client that has only `artificialflowclient`. With `false` (no IAM
+provider) no token is needed. See [API.md — Authentication](API.md#authentication).
+
 ## Compatibility
 
 - Protocol negotiation request header: `X-Workflow-Worker-Protocol-Version` (`v1`).
@@ -29,8 +35,10 @@ accepted. Scope is operation + job key (for example `jobs.complete:{jobKey}`).
 | :--- | :--- |
 | Any (raw HTTP) | [API.md](API.md#worker--jobs-api) |
 | Node.js | [`@artificialflow/nodejs-sdk`](sdk-nodejs.md) `createWorker` |
-| Go | [`backend/libs/worker`](../backend/libs/worker/README.md) |
-| Python | [`clients/python-sdk`](../clients/python-sdk/README.md) |
+| .NET | [`ArtificialFlow.Sdk`](sdk-dotnet.md) `JobWorker` |
+| Java | [`io.artificialflow:artificialflow-sdk`](sdk-java.md) `JobWorker` |
+| Python | [`artificialflow-worker`](sdk-python.md) `Worker` |
+| Go | [`backend/libs/worker`](sdk-go.md) `NewWorker` |
 
 ## Conformance
 

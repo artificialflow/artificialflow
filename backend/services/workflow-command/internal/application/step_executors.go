@@ -64,7 +64,19 @@ func (x *ServiceTaskExecutor) Execute(ctx context.Context, e *Engine, instance *
 			UpdatedAt:            time.Now(),
 		}
 		if err := e.repo.CreateJob(ctx, job); err != nil {
-			// log error?
+			return fmt.Errorf("failed to create service-task job: %w", err)
+		}
+		if err := e.eventPublisher.Publish(ctx, &pb.JobCreated{
+			Key:                  job.Key,
+			Id:                   job.ID,
+			Type:                 job.Type,
+			ProcessInstanceKey:   job.ProcessInstanceKey,
+			ElementInstanceKey:   job.ElementInstanceKey,
+			ProcessDefinitionKey: job.ProcessDefinitionKey,
+			ElementId:            job.ElementID,
+			CreatedAt:            timestamppb.New(job.CreatedAt),
+		}, "JobCreated"); err != nil {
+			return fmt.Errorf("failed to publish JobCreated: %w", err)
 		}
 	}
 
@@ -344,7 +356,7 @@ func (x *ScriptTaskExecutor) Execute(ctx context.Context, e *Engine, instance *m
 			incident.ElementInstanceKey = exec.ElementInstanceKey
 		}
 
-		incident.ErrorType = errorCode
+		incident.ErrorType = model.IncidentErrorType(errorCode)
 		incident.ErrorMessage = errorMessage
 		incident.State = "CREATED"
 		incident.CreatedAt = time.Now()

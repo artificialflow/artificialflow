@@ -1,501 +1,268 @@
 # Deployment Guide
 
-ArtificialFlow supports the same application stack with either an existing OIDC provider
-or a bundled ZITADEL installation:
+ArtificialFlow has exactly two deployment paths with the same topology:
 
-- **External IAM**: ArtificialFlow validates identities created and managed by your OIDC
-  provider. ArtificialFlow does not create external users, clients, roles, or tokens.
-- **Bundled IAM**: ArtificialFlow installs ZITADEL and bootstraps the ArtificialFlow project,
-  applications, roles, initial administrator, and internal introspection client.
+| Path | File | Use |
+| :--- | :--- | :--- |
+| Docker Compose | `docker-compose.yml` (no `.env` needed) | local development, evaluation, single host |
+| Helm | `charts/artificialflow` + one values file | Kubernetes, production |
 
-Docker Compose is intended for local development and evaluation. The Helm chart
-is the production deployment path.
+Both run Postgres, Elasticsearch, Kafka, Debezium Connect, and the ArtificialFlow
+services (command, runtime, query, sync-worker, frontend, gateway). Kafka +
+Debezium is the only event transport. Elasticsearch 8 is the only supported
+search backend. ArtificialFlow does not ship an IAM
+product: users, SDK clients, roles, and API tokens live in your external OIDC
+provider.
 
-## Deployment options
+`IAM_DEPLOYMENT_MODE` (Helm: `iam.mode`) is a boolean:
 
-- `docker-compose.external-iam.yml`: full local stack connected to an existing
-  OIDC provider.
-- `docker-compose.zitadel.yml`: full local stack with bundled ZITADEL.
-- `docker-compose.release.yml`: override for either Compose option that uses
-  published images instead of local builds.
-- `charts/artificialflow/values-external-iam.yaml`: Kubernetes with external IAM and
-  operator-managed infrastructure.
-- `charts/artificialflow/values-internal-iam.yaml`: Kubernetes with bundled ZITADEL and
-  operator-managed ArtificialFlow infrastructure.
+- `true` (Helm default): an external OIDC provider is used. The issuer URLs,
+  `AUTH_CLIENT_ID`, and `AUTH_CLAIM_ROLES_PATH` are required. Console users and
+  SDK clients sign in through that provider.
+- `false` (Compose default): no IAM provider and no OIDC issuer. The console
+  uses a local sign-in, `admin` / `admin` by default
+  (`CONSOLE_ADMIN_USERNAME` / `CONSOLE_ADMIN_PASSWORD`, Helm
+  `iam.consoleAdmin`), and the APIs and SDKs need no token. For local/CI runs.
 
-Both IAM modes deploy the command API, runtime, query API, sync worker,
-frontend, and gateway. The Compose profiles also include ArtificialFlow Postgres,
-Kafka, Debezium Connect, and Elasticsearch. Bundled IAM additionally includes
-ZITADEL and its database.
+Any other value, including the old `external` / `disabled`, fails startup with
+an error naming the allowed values `true` and `false`. `CONSOLE_ADMIN_*` are
+passed to the command service only when the mode is `false`.
 
-## Shared prerequisites
+## 1. Prepare the OIDC provider
 
-For Docker Compose:
-
-- Docker Engine or Docker Desktop with Docker Compose v2.
-- Free local ports `5432`, `8080`, `8081`, `8083`, `8092`, `9092`, `9100`, and
-  `9200`; bundled IAM also requires `9180`.
-- Enough Docker memory for Elasticsearch, Kafka, Debezium, ArtificialFlow, and, in
-  bundled mode, ZITADEL.
-- `curl` for the post-deployment checks.
-- Node.js 20 or newer only when building or testing the Node.js SDK locally.
-
-For Kubernetes:
-
-- A Kubernetes cluster, Helm 3, and `kubectl`.
-- An ingress controller, DNS, and TLS certificates for the ArtificialFlow hostname.
-- Reachable Postgres and Elasticsearch/OpenSearch.
-- Reachable Kafka plus Debezium Connect for the default Kafka projection, or a
-  reachable NATS deployment when `eventBus.type=nats`.
-- A container registry accessible by the cluster.
-- Kubernetes Secrets or an external secret manager for every credential.
-- A storage class supporting `ReadWriteMany` when using bundled ZITADEL with
-  the chart defaults; its three bootstrap/auth PVCs request RWX access.
-- Backup, monitoring, and restore procedures for stateful dependencies.
-
-## Deployment identity and rename compatibility
-
-Fresh Compose deployments use project name `artificialflow`, project-scoped
-container names, and these explicit volume names:
-
-- `artificialflow-postgres-data`
-- `artificialflow-elasticsearch-data`
-- `artificialflow-zitadel-postgres-data`
-- `artificialflow-zitadel-system-bootstrap`
-- `artificialflow-zitadel-bootstrap`
-- `artificialflow-zitadel-auth`
-
-The Compose files intentionally do not hard-code `container_name`; Compose
-derives collision-safe names from the selected project and service. To attach
-an existing installation, discover the exact old project and volume names
-before rendering. Set only names that actually exist:
-
-```bash
-
-docker compose -f docker-compose.zitadel.yml config --quiet
-bash scripts/validate_compose_identities.sh
-```
-
-installation created from another directory or `COMPOSE_PROJECT_NAME` can have
-different names. A wrong override creates empty storage and can look like data
-loss. Never use a volume-deleting cleanup command during the rename. Back up
-the old volumes first and keep the legacy environment overrides together as
-the rollback configuration.
-
-Fresh Helm installs use chart/release identity `artificialflow`, canonical
-selectors, canonical Secrets/PVCs, and `artificialflow/*` images. An in-place
-upgrade of the former chart must include
-`charts/artificialflow/values-legacy-persistent-identifiers.yaml`. It preserves
-the old fullnames and immutable selectors and renders the existing standalone
-PVCs and Secrets with the keep policy. For a nonstandard old release, copy the
-file and derive all compatibility identity values from live manifests.
-
-## External IAM prerequisites
-
-Complete these steps in the external provider before starting ArtificialFlow:
-
-1. Create a backend API resource/audience. Its identifier must match
-   `AUTH_CLIENT_ID` or `iam.auth.clientId`; the examples use
-   `workflow-backend`.
-2. Create a public browser client. The examples use `workflow-frontend`.
-   Enable Authorization Code with PKCE and do not assign a client secret.
-3. Register the ArtificialFlow origin as the login redirect, silent redirect,
-   post-logout redirect, and allowed web origin. Local Compose uses
-   `http://localhost:9100`; Kubernetes uses the public ArtificialFlow HTTPS origin.
-4. Create a confidential machine-to-machine client with the client-credentials
-   grant for SDK, worker, and automation access.
-5. Create and assign the exact role names described in
-   [IAM roles](iam.md#external-iam-role-provisioning).
-6. Emit those roles in a claim configured by `AUTH_CLAIM_ROLES_PATH` or
+1. Create a backend API resource/audience, e.g. `workflow-backend`
+   (`AUTH_CLIENT_ID` / `iam.auth.clientId`).
+2. Create a public browser client with Authorization Code + PKCE and no
+   secret, e.g. `workflow-frontend`. Register the ArtificialFlow origin
+   (`http://localhost:9100` for Compose) as redirect, silent redirect,
+   post-logout redirect, and web origin.
+3. Create a confidential client with the client-credentials grant for SDKs,
+   workers, and automation.
+4. Create the roles in [IAM roles](iam.md#external-iam-role-provisioning) and
+   emit them in the claim named by `AUTH_CLAIM_ROLES_PATH` /
    `iam.auth.claimRolesPath`.
-7. Include the ArtificialFlow backend audience in access tokens. Audience enforcement
-   is enabled in the supplied external-IAM configurations.
-8. Confirm that the OIDC discovery document and JWKS are reachable from the
-   ArtificialFlow containers or pods, while the public issuer is reachable from user
-   browsers.
+5. Include the backend audience in access tokens (audience enforcement is on).
+6. Make discovery and JWKS reachable from containers/pods and the public
+   issuer reachable from browsers.
 
-Use `AUTH_TOKEN_MODE=jwt` for self-contained JWT access tokens. For opaque
-tokens, use `AUTH_TOKEN_MODE=introspection` and configure the introspection URL,
-client ID, client secret, and `basic` or `post` authentication method.
+Opaque tokens: set `AUTH_TOKEN_MODE=introspection` plus the introspection URL,
+client ID, and secret. Provider recipes: [docs/iam/](iam/).
 
-## Docker Compose: external IAM
+## 2. Docker Compose
 
-### 1. Configure the provider values
-
-Replace every `https://login.example.com` placeholder in
-`docker-compose.external-iam.yml`. Apply the same backend settings to both
-`app` and `workflow-query`:
-
-```yaml
-AUTH_ISSUER_INTERNAL_URL: https://login.example.com
-AUTH_ISSUER_PUBLIC_URL: https://login.example.com
-AUTH_CLIENT_ID: workflow-backend
-AUTH_TOKEN_MODE: jwt
-AUTH_CLAIM_ROLES_PATH: roles,realm_access.roles,groups
-AUTH_ENFORCE_AUDIENCE: "true"
-AUTH_ALLOW_INSECURE_ISSUER: "false"
-```
-
-Configure the browser client under `frontend`:
-
-```yaml
-FRONTEND_AUTH_OIDC_AUTHORITY: https://login.example.com
-FRONTEND_AUTH_OIDC_CLIENT_ID: workflow-frontend
-```
-
-`AUTH_ISSUER_INTERNAL_URL` is used for server-side provider access.
-`AUTH_ISSUER_PUBLIC_URL` is the issuer seen by the browser and written into
-tokens. They are normally the same HTTPS URL. If a local IAM container has
-different Docker and browser addresses, use the Docker address internally, the
-browser address publicly, and set `AUTH_ALLOW_INSECURE_ISSUER: "true"` only for
-that local test arrangement.
-
-For introspection, set the following values on both backend services and keep
-the secret out of source control:
-
-```yaml
-AUTH_TOKEN_MODE: introspection
-AUTH_INTROSPECTION_URL: https://login.example.com/oauth2/introspect
-AUTH_INTROSPECTION_CLIENT_ID: workflow-introspection
-AUTH_INTROSPECTION_CLIENT_SECRET: replace-me
-AUTH_INTROSPECTION_AUTH_METHOD: basic
-```
-
-No custom Docker network is required for an HTTPS provider. If the provider
-runs in another Compose project, attach `app` and `workflow-query` to a shared
-external Docker network or expose a hostname reachable from those containers.
-
-### 2. Validate and start
+Requirements: Docker with Compose v2, enough memory for Elasticsearch + Kafka,
+and free ports `5432 8080 8081 8083 8092 9092 9100 9200`.
 
 ```bash
-docker compose -f docker-compose.external-iam.yml config --quiet
-make smoke-core
-make up-external-iam
+make smoke              # validates the rendered config and Kafka wiring
+make up                 # builds from source, no IAM (console: admin / admin)
+ARTIFICIALFLOW_IMAGE_TAG=1.2.0 make up-release   # or run published images
 ```
 
-To use published images:
+`docker-compose.yml` is self-contained: every setting is written as
+`${NAME:-default}`, so no `.env` is required. Override any value from the shell,
+a `.env` file (Compose loads it automatically when present), or
+`--env-file`. To turn on OIDC:
 
 ```bash
-ARTIFICIALFLOW_IMAGE_TAG=1.1.0 make up-external-iam-release
+IAM_DEPLOYMENT_MODE=true \
+AUTH_ISSUER_INTERNAL_URL=https://login.example.com \
+AUTH_ISSUER_PUBLIC_URL=https://login.example.com \
+make up
 ```
 
-### 3. External-IAM postconditions
+`AUTH_ISSUER_INTERNAL_URL` is the issuer as reached from
+containers and `AUTH_ISSUER_PUBLIC_URL` the one browsers see and tokens carry;
+they are usually identical. Set `AUTH_ALLOW_INSECURE_ISSUER=true` only for a
+local plain-HTTP provider.
 
-The deployment is ready when all of these conditions hold:
+Ready when:
 
 ```bash
-make ps-external-iam
+make ps                                   # nothing exited or unhealthy
 curl -fsS http://localhost:9100/api/health
 curl -fsS http://localhost:9100/api/query/health
-curl -fsS http://localhost:8092/health
-curl -fsS http://localhost:8083/connectors/artificialflow-postgres-connector/status
+curl -fsS http://localhost:8083/connectors/artificialflow-postgres-connector/status   # RUNNING
+curl -fsS -H "Authorization: Bearer ${ARTIFICIALFLOW_TOKEN}" http://localhost:9100/api/identity/me
 ```
 
-The connector name is a legacy wire identifier retained for rolling-upgrade
-compatibility.
+Schema migration runs when the command and runtime processes open Postgres.
+Debezium connector registration (sync-worker) is automatic. `make init-connector`
+is a recovery action only.
+`make down` stops the stack; `make clean` also deletes the named volumes
+`artificialflow-postgres-data` and `artificialflow-elasticsearch-data`.
 
-- Compose reports no exited or unhealthy required service.
-- Both API health calls return `{"status":"ok"}`.
-- The connector and all connector tasks report `RUNNING`.
-- `http://localhost:9100` redirects to the configured provider and a user with
-  `artificialflow admin` or `artificialflow modeler` can sign in.
-- An SDK token returns an authenticated principal containing `artificialflow client`:
+Compose identity (project, network, and volume names) is controlled by
+`ARTIFICIALFLOW_COMPOSE_PROJECT_NAME`, `ARTIFICIALFLOW_NETWORK`,
+`ARTIFICIALFLOW_PGDATA_VOLUME`, and `ARTIFICIALFLOW_ESDATA_VOLUME`. When
+attaching an existing installation, set only names that already exist and
+verify with `bash scripts/validate_compose_identities.sh`; a wrong name creates
+empty storage.
+
+## 3. Helm
+
+No Helm repository is published. Install the chart from a clone of the release
+tag. The chart and image tags (`appVersion`) come from the same release.
 
 ```bash
-curl -fsS \
-  -H "Authorization: Bearer ${ARTIFICIALFLOW_TOKEN}" \
-  http://localhost:9100/api/identity/me
+git clone --depth 1 --branch v1.2.0 https://github.com/artificialflow/artificialflow.git
+cd artificialflow
+helm upgrade --install artificialflow ./charts/artificialflow \
+  --namespace artificialflow --create-namespace -f my-values.yaml
 ```
 
-Database migration and connector registration are automatic. If the connector
-is missing after the command service has initialized the database, run
-`make init-connector` as a recovery action and inspect
-`make logs-external-iam`.
-
-## Docker Compose: bundled ZITADEL
-
-### 1. Validate and start
-
-No external IAM provisioning is needed. The bootstrap creates the project,
-browser application, API/introspection application, standard roles, initial
-administrator, and required system identities.
-
-```bash
-docker compose -f docker-compose.zitadel.yml config --quiet
-make smoke-full
-make up-zitadel
-```
-
-To use published images:
-
-```bash
-ARTIFICIALFLOW_IMAGE_TAG=1.1.0 make up-zitadel-release
-```
-
-The first boot can take several minutes while ZITADEL initializes and ArtificialFlow
-waits for generated client files.
-
-Important bootstrap limitation (evaluation only): every bundled-ZITADEL restart
-reconciles the configured initial administrator and deletes other human users
-holding `artificialflow admin` for the ArtificialFlow project. Treat bundled ZITADEL as an
-evaluation IAM: use the single configured human administrator, and prefer
-**external OIDC** ([docs/iam.md](iam.md)) for durable multi-user environments.
-
-### 2. Bundled-IAM postconditions
-
-```bash
-make ps-zitadel
-curl -fsS http://localhost:9100/api/health
-curl -fsS http://localhost:9100/api/query/health
-curl -fsS http://localhost:8092/health
-curl -fsS http://localhost:8083/connectors/artificialflow-postgres-connector/status
-```
-
-- ArtificialFlow is available at `http://localhost:9100`.
-- ZITADEL is available at `http://localhost:9180`.
-- The local development administrator can sign in with username `admin`,
-  password `admin`, and email `admin@admin.localhost`.
-- The administrator has `artificialflow admin`; all three standard roles are visible.
-- The **SDK Clients** page can create a client and download its one-time
-  service-account profile.
-- Both APIs are healthy and the Debezium connector is `RUNNING`.
-
-For either Compose mode, command/query health is process-level only. Sync
-health can return HTTP 200 while starting or degraded. A deployment is not
-functionally verified until authenticated identity, connector/task status, and
-write-to-query projection checks pass.
-
-The default credentials, HTTP issuer, database passwords, and exposed service
-ports are local-development settings only.
-
-## Stopping Docker Compose
-
-```bash
-make down-external-iam
-make down-zitadel
-```
-
-To also delete databases, search indexes, bootstrap state, and other named
-volumes:
-
-```bash
-make clean-external-iam
-make clean-zitadel
-```
-
-## Kubernetes and Helm
-
-Create an environment-specific values file rather than editing the checked-in
-examples. Pin every ArtificialFlow image tag and provide production dependency
-addresses:
-
-```yaml
-postgresql:
-  existingSecret: artificialflow-postgres
-  existingSecretKey: PG_DSN
-
-search:
-  backend: elasticsearch
-  address: https://elasticsearch.example.internal:9200
-
-eventBus:
-  type: kafka
-  kafka:
-    brokers: kafka.example.internal:9092
-
-syncWorker:
-  env:
-    connectUrl: http://debezium-connect.example.internal:8083
-    connectBootstrapEnabled: "false"
-```
-
-The embedded connector configuration contains Compose development connection
-values. Kafka-based production deployments should disable automatic
-registration and provision the connector separately through a secret-aware
-deployment process. `syncWorker.env.connectorJson` can override the embedded
-configuration, but it is rendered into a ConfigMap and must not contain a
-database password. Postgres must permit logical replication and the connector
-identity must be able to read the captured tables and create/use the
-publication and slot. NATS mode does not bootstrap the Debezium connector.
-
-The Secret selected by `postgresql.existingSecret` must contain `PG_DSN`. In
-external introspection mode, it must also contain
-`AUTH_INTROSPECTION_CLIENT_SECRET`, unless the chart creates the secret from
-`iam.auth.introspectionClientSecret`.
-
-### Helm with external IAM
-
-Add the external provider settings to your environment values:
+A minimal `my-values.yaml`:
 
 ```yaml
 iam:
-  mode: external
+  mode: true                          # boolean; false = no IAM provider
   auth:
     issuerInternalUrl: https://login.example.com
     issuerPublicUrl: https://login.example.com
     clientId: workflow-backend
-    tokenMode: jwt
-    claimRolesPath: roles,realm_access.roles,groups
-    enforceAudience: true
-    allowInsecureIssuer: false
   frontend:
-    oidcAuthority: https://login.example.com
-    oidcClientId: workflow-frontend
-
-zitadel:
-  enabled: false
-
+    oidcClientId: workflow-frontend   # authority defaults to issuerPublicUrl
 ingress:
-  enabled: true
-  host: app.artificialflow.example.io
-  tls:
-    enabled: true
-    secretName: artificialflow-tls
+  host: app.example.com
+cors:
+  allowedOrigins: https://app.example.com
+postgresql:
+  password: replace-me                # or existingSecret
 ```
 
-Validate and install:
+Add `-f charts/artificialflow/values-production-reference.yaml` for the HA
+topology (3 multi-active runtimes, monitoring). For a cluster smoke test without
+a provider use `values-kind-smoke.yaml` (`iam.mode: false`; the console signs
+in with `iam.consoleAdmin`, stored as `CONSOLE_ADMIN_PASSWORD` in the env
+Secret). `iam.mode` must be a YAML boolean: `--set iam.mode=false` works,
+`--set-string` or `"external"`/`"disabled"` fails. `make validate-helm` lints and renders
+every supported combination; the chart fails fast on missing issuer, client, or
+dependency addresses, wildcard CORS, HSTS without TLS, and secret names in the
+plain `env` map.
+
+### Migrations
+
+There is no migration Job. Command and runtime apply pending migrations when
+they start, under one Postgres advisory lock, and validate the checksums
+before they serve.
+
+- `startupProbe.periodSeconds` x `startupProbe.failureThreshold` is the
+  migration window (5 s x 120 = 10 minutes by default). Raise it before an
+  upgrade with a long migration.
+- App Deployments roll with `maxUnavailable: 0`. A failed migration leaves the
+  old pods serving and the new pod not ready.
+- The database user in `PG_DSN` needs DDL rights on its schema.
+- Values from older charts under `migration.*` fail rendering. Remove them.
+- To migrate out of band, run `./workflow-migrate` from the command image.
+
+### Kafka partitions
+
+The sync-worker creates the Kafka topics with `kafka.topicPartitions`
+partitions (default `3`). Sync-worker replicas beyond the partition count sit
+idle. Existing topics keep their partition count.
+
+### Managed dependencies
+
+Each dependency is bundled by default. Disable it and give an address:
+
+```yaml
+postgresql: {bundled: {enabled: false}, host: pg.internal, existingSecret: artificialflow-pg}
+search:     {bundled: {enabled: false}, address: https://es.internal:9200}
+kafka:      {bundled: {enabled: false}, brokers: kafka-1.internal:9092,kafka-2.internal:9092}
+connect:    {bundled: {enabled: false}, url: http://debezium-connect.internal:8083}
+```
+
+See [values-managed-deps.yaml](../charts/artificialflow/examples/values-managed-deps.yaml).
+`postgresql.existingSecret` must contain `PG_DSN`, plus `POSTGRES_PASSWORD`
+(bundled Postgres and Debezium) and `AUTH_INTROSPECTION_CLIENT_SECRET`
+(introspection mode) when used. Egress to external endpoints needs
+`networkPolicy.external.*CIDRs`.
+
+The sync-worker registers the Debezium connector with the configured Postgres
+host, port, database, user, and password (`CONNECTOR_DATABASE_*`, password read
+from the Secret). To provision the connector yourself, set
+`syncWorker.env.CONNECT_BOOTSTRAP_ENABLED: "false"`. Postgres must allow logical
+replication and the connector user must read the captured tables and manage
+the publication and slot.
+
+### Upgrading the former chart in place
+
+Fresh installs use canonical names. To upgrade a release created by the former
+chart without renaming immutable selectors, set
+`compatibility.legacyResourceNames.{enabled,fullnameOverride,selectorNameOverride,selectorInstanceOverride}`
+from the live manifests. Moving to canonical names is a blue/green cutover:
+back up Postgres, search, and PVCs; freeze writes until outbox and projection
+lag reach zero; install the canonical release separately; switch traffic after
+validation; keep the old release for the rollback window. Never run two
+writers against one database, connector slot, or consumer group.
+
+### Ready when
 
 ```bash
-make validate-helm
-helm lint ./charts/artificialflow -f ./charts/artificialflow/values-external-iam.yaml -f ./values-production.yaml
-helm upgrade --install artificialflow ./charts/artificialflow \
-  --namespace artificialflow --create-namespace \
-  -f ./charts/artificialflow/values-external-iam.yaml \
-  -f ./values-production.yaml
+kubectl -n artificialflow get pods
+curl -fsS https://app.example.com/api/health
+curl -fsS https://app.example.com/api/query/health
 ```
 
-### Helm with bundled ZITADEL
+Every pod is Ready, OIDC login returns the expected roles from
+`/api/identity/me`, the connector and its tasks are `RUNNING`, and a deployed
+workflow appears in the query API. `/health` only proves the process runs; the
+identity, connector, and write-to-query checks are the real postconditions.
 
-Use separate HTTPS hostnames for ArtificialFlow and ZITADEL. Configure
-`zitadel.publicUrl`, `zitadel.externalDomain`, `zitadel.bootstrap.frontendUrl`,
-and both ingresses consistently. The ZITADEL master key must be exactly 32
-characters.
+## Configuration reference
 
-For production, set `zitadel.existingSecret` to a Secret containing:
+Every variable below has a built-in default. Compose passes through only the
+ones it lists (`IAM_DEPLOYMENT_MODE`, the issuer URLs, `AUTH_CLIENT_ID`,
+`AUTH_CLAIM_ROLES_PATH`, `AUTH_ALLOW_INSECURE_ISSUER`, plus the runtime and
+storage settings); to override another one, add it to the `x-auth-env` block.
+`CONSOLE_ADMIN_*` are not in that block: the app service loads them from
+`compose/iam-false.env`, which is only picked up when
+`IAM_DEPLOYMENT_MODE=false`. Helm sets the IAM keys from `iam.*` and takes anything else
+through `env:` (all services) or `<component>.env:` (one service).
 
-- `ZITADEL_MASTERKEY`
-- `ZITADEL_ADMIN_PASSWORD`
-- `ZITADEL_POSTGRES_PASSWORD`
-- `ZITADEL_DATABASE_POSTGRES_DSN`
-
-The bootstrap automatically supplies ArtificialFlow's generated frontend client,
-project audience, roles, and authenticated introspection credentials.
-
-Review these current bundled-chart constraints before production use:
-
-- The three bootstrap/auth PVCs default to `ReadWriteMany`.
-- Bootstrap reconciliation retains the configured administrator and deletes
-  additional human ArtificialFlow administrators on restart.
-- The generated frontend OIDC application currently uses ZITADEL development
-  mode.
-- Bootstrap relaxes instance password policy and does not require the initial
-  administrator to change the supplied password.
-- Internal owner/login bootstrap PAT expirations default to 2099 and are stored
-  on persistent volumes.
-- Changing the frontend hostname does not reconcile redirect URIs on an
-  existing generated application, and changing the configured administrator
-  password does not reset an existing administrator's password.
-
-These are explicit operational risks, not production hardening defaults.
-Restrict PVC and IAM access, use a dedicated ZITADEL instance, and test restart,
-credential rotation, and upgrade behavior before approving bundled mode for
-production.
-
-```bash
-make validate-helm
-helm lint ./charts/artificialflow -f ./charts/artificialflow/values-internal-iam.yaml -f ./values-production.yaml
-helm upgrade --install artificialflow ./charts/artificialflow \
-  --namespace artificialflow --create-namespace \
-  -f ./charts/artificialflow/values-internal-iam.yaml \
-  -f ./values-production.yaml
-```
-
-### Controlled cutover to canonical Kubernetes names
-
-Changing resource names to canonical `artificialflow`
-names is a blue/green deployment, not a normal in-place Helm upgrade:
-
-1. Inventory the old release manifest, resource names, selectors, Secrets,
-   standalone PVCs, StatefulSet claims, external databases, search indices,
-   connector offsets, and ingress/DNS configuration.
-2. Take tested backups or snapshots of Postgres, search, every PVC, and IAM
-   state. Record the exact image digests and values for rollback.
-3. Upgrade the old release once with
-   `values-legacy-persistent-identifiers.yaml`. Review the rendered diff first.
-   This keeps old identities and applies keep/retention protection before any
-   name migration.
-4. Verify the old stack is healthy, then schedule a write freeze. Stop new
-   workflow/API writes, let outbox and projection lag reach zero, and stop the
-   old consumers before copying mutable state.
-5. Restore into separately named canonical databases, indices, and claims, or
-   attach deliberately pre-provisioned clones through the chart's
-   `existingSecret`/`existingClaim` settings. Do not let blue and green writers
-   share one mutable database, connector slot, consumer group, or RWO claim.
-6. Install release `artificialflow` with the canonical chart defaults in a
-   separate namespace or routing boundary. Keep ingress/DNS pointed at the old
-   stack while running health, IAM, workflow, and write-to-query checks.
-7. Switch traffic only after validation and retain the old release and backups
-   unchanged for the rollback window.
-8. To roll back, restore the old ingress/DNS target and resume the old stack
-   with its recorded compatibility values. If the green stack accepted writes,
-   reconcile or restore state according to the tested recovery plan before
-   reopening writes; do not run both writers concurrently.
-
-The release workflows do not perform this migration or delete old resources.
-After the rollback window, retire the legacy release only through an
-operator-approved change that separately verifies every retained Secret and
-PVC.
-
-### Helm postconditions
-
-```bash
-kubectl get pods -n artificialflow
-kubectl get ingress -n artificialflow
-kubectl get events -n artificialflow --sort-by=.lastTimestamp
-curl -fsS https://app.artificialflow.example.io/api/health
-curl -fsS https://app.artificialflow.example.io/api/query/health
-```
-
-The installation is complete when:
-
-- Every ArtificialFlow Deployment is available and all pods are Ready.
-- The command and query health endpoints return `{"status":"ok"}`.
-- The public ArtificialFlow page loads through TLS.
-- External mode completes an OIDC login and returns the expected roles from
-  `/api/identity/me`.
-- Bundled mode exposes the ZITADEL TLS hostname, completes bootstrap, and lets
-  the configured initial administrator sign in.
-- The sync worker is healthy and, for Kafka mode, the Debezium connector and
-  tasks are `RUNNING`.
-- A workflow can be deployed, started, and found through the query API after
-  projection.
-
-Command and query `/health` responses only prove that the HTTP process is
-running; they do not test IAM, Postgres, search, or the event transport. Sync
-health can return HTTP 200 with `status: "starting"` or `"degraded"` while
-`healthFailOnStale` is false. Treat the authenticated identity check, connector
-status, and write-to-query projection test as required postconditions rather
-than relying on pod readiness alone.
+| Variable | Default | Notes |
+| :--- | :--- | :--- |
+| `IAM_DEPLOYMENT_MODE` | Compose: `false`, Helm: `true` | `true` or `false`; anything else (including `external`/`disabled`) fails startup. `false` ignores every `AUTH_*` issuer setting; `true` fails startup without an issuer |
+| `CONSOLE_ADMIN_USERNAME` / `CONSOLE_ADMIN_PASSWORD` | `admin` / `admin` | console sign-in, passed and read only when `IAM_DEPLOYMENT_MODE=false`; does not protect the API |
+| `AUTH_ISSUER_INTERNAL_URL` / `AUTH_ISSUER_PUBLIC_URL` | — | required when `IAM_DEPLOYMENT_MODE=true` |
+| `AUTH_CLIENT_ID` | `workflow-backend` | expected audience |
+| `AUTH_TOKEN_MODE` | `jwt` | `jwt` or `introspection` |
+| `AUTH_INTROSPECTION_URL` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_AUTH_METHOD` | — / — / — / `basic` | introspection only |
+| `AUTH_CLAIM_ROLES_PATH` | `roles,realm_access.roles,groups` | comma-separated claim paths |
+| `AUTH_CLAIM_SUBJECT_PATH` / `_TENANT_PATH` / `_EMAIL_PATH` / `_NAME_PATH` | `sub` / `tenant_id` / `email` / `name` | |
+| `AUTH_ENFORCE_AUDIENCE` | `true` | |
+| `AUTH_ALLOWED_ALGORITHMS` | `RS256` | |
+| `AUTH_ALLOW_INSECURE_ISSUER` | `false` | local HTTP providers only |
+| `AUTH_PRODUCTION` | `false` (Helm: `true` when `iam.mode` is `true`) | |
+| `TENANT_MODE` | `compat` | use `strict` in production |
+| `FRONTEND_AUTH_OIDC_AUTHORITY` | `AUTH_ISSUER_PUBLIC_URL` | |
+| `FRONTEND_AUTH_OIDC_CLIENT_ID` | `workflow-frontend` | |
+| `ALLOWED_ORIGINS` / `CORS_ALLOW_CREDENTIALS` | localhost origins / `false` | exact origins in production |
+| `RUNTIME_SCHEDULER_MODE` | `compat` | `multi-active` for HA (Helm: `runtime.schedulerMode`) |
+| `RUNTIME_TICK_INTERVAL` / `RUNTIME_TASK_TIMEOUT` / `RUNTIME_CLAIM_BATCH_SIZE` / `RUNTIME_LEASE_TTL` | `1s` / `5s` / `100` / `15s` | |
+| `OUTBOX_RELAY_INTERVAL` / `OUTBOX_RELAY_BATCH_SIZE` | tick interval / `200` | runtime outbox relay |
+| `IDEMPOTENCY_RETENTION` | `168h` | |
+| `ES_INDEX_PREFIX` | `artificialflow` | |
+| `KAFKA_TOPIC_PARTITIONS` | `3` | sync-worker topic creation (Helm: `kafka.topicPartitions`) |
+| `CONNECT_BOOTSTRAP_ENABLED` | `true` | sync-worker registers the Debezium connector |
+| `CONNECTOR_JSON` / `CONNECTOR_FILE` | embedded config | full connector override; no passwords in ConfigMaps |
+| `SYNC_FRESHNESS_SLO_SEC` / `SYNC_HEALTH_FAIL_ON_STALE` | `120` / `false` | |
+| `LOG_LEVEL` | `info` | |
 
 ## Production requirements
 
-- Replace every example hostname and credential; never use Compose defaults.
-- Use TLS for all public endpoints and untrusted network links; protect any
-  intentionally internal plaintext service route with network policy.
-- Keep audience validation enabled and verify that tokens contain the configured
-  backend audience.
-- Keep SDK tokens short-lived and rotate client secrets or private keys.
-- Store SDK profiles and IAM credentials in a secret manager.
-- Do not expose SDK service-account tokens to browsers.
-- Back up Postgres and search state and test restoration.
-- Monitor the gateway, command, runtime, query, sync worker, IAM, database,
-  event transport, connector, and search services.
-- Plan schema changes carefully: command and runtime currently run GORM
-  `AutoMigrate` during startup; there is no serialized migration Job or
-  versioned rollback mechanism.
-- Validate image signatures, SBOM/provenance artifacts, resource limits,
-  network policies, pod disruption, and upgrade/rollback procedures.
+- Replace every example hostname and credential; never reuse Compose defaults.
+- Set `TENANT_MODE=strict` and exact CORS origins; provision the roles in the
+  [IAM Guide](iam.md).
+- Terminate TLS at the ingress; keep HSTS only when that holds.
+- Keep audience validation on, SDK tokens short-lived, and client secrets in a
+  secret manager. Never expose SDK tokens to browsers.
+- Prefer managed Postgres, Kafka, and Elasticsearch; back them up and test restores.
+- Migrations run when command and runtime open Postgres, under one Postgres
+  advisory lock, so the application database user needs DDL rights. Ship
+  schema changes as expand/contract and keep the Debezium-captured table names
+  stable.
+- Verify image signatures and SBOM/provenance; see [DOCKER_IMAGES.md](DOCKER_IMAGES.md).
 
-See [IAM](iam.md) for role and claim configuration and
-[Node.js SDK](sdk-nodejs.md) for authentication examples. Published image
-names and verification guidance are in [DOCKER_IMAGES.md](DOCKER_IMAGES.md).
+Client authentication: [Node.js](sdk-nodejs.md), [.NET](sdk-dotnet.md),
+[Java](sdk-java.md), [Python worker](sdk-python.md), [Go worker](sdk-go.md).

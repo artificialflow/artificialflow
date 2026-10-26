@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/application"
+	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/domain/repository"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -24,6 +25,45 @@ func TestNewKafkaConsumerAppliesConfigDefaults(t *testing.T) {
 	}
 	if consumer.cfg.RetryBackoff <= 0 {
 		t.Fatalf("expected retry backoff to be defaulted, got %s", consumer.cfg.RetryBackoff)
+	}
+}
+
+func TestConsumerDedupeKeyIncludesTenantAndEventID(t *testing.T) {
+	consumer := NewKafkaConsumer(Config{}, nil)
+	tenantA := "tenant-a\x00event-1"
+	tenantB := "tenant-b\x00event-1"
+	consumer.markEventProcessed(tenantA)
+	if !consumer.eventAlreadyProcessed(tenantA) {
+		t.Fatal("same tenant and event ID must dedupe")
+	}
+	if consumer.eventAlreadyProcessed(tenantB) {
+		t.Fatal("same event ID in another tenant must remain independent")
+	}
+}
+
+func TestResolveEventTenantModes(t *testing.T) {
+	tests := []struct {
+		name, raw, mode, want string
+		wantErr               bool
+	}{
+		{name: "explicit tenant in strict mode", raw: " tenant-a ", mode: "strict", want: "tenant-a"},
+		{name: "compat maps missing tenant", mode: "compat", want: "default"},
+		{name: "unset mode remains compatible", want: "default"},
+		{name: "strict rejects missing tenant", mode: "strict", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := resolveEventTenant(test.raw, test.mode)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected tenant resolution error")
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("tenant = %q, err=%v; want %q", got, err, test.want)
+			}
+		})
 	}
 }
 
@@ -260,4 +300,16 @@ func (r *flakyRepo) Delete(_ context.Context, _ string, _ string) error {
 
 func (r *flakyRepo) UpdateWithScript(_ context.Context, _ string, _ string, _ string, _ map[string]any) error {
 	return nil
+}
+
+func (r *flakyRepo) UpsertWithScript(_ context.Context, _ string, _ string, _ string, _ map[string]any, _ map[string]any) error {
+	return nil
+}
+
+func (r *flakyRepo) Bulk(_ context.Context, ops []repository.WriteOp) ([]repository.BulkItemResult, error) {
+	out := make([]repository.BulkItemResult, len(ops))
+	for i := range ops {
+		out[i] = repository.BulkItemResult{Status: 200}
+	}
+	return out, nil
 }

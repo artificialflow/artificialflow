@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/id"
+	"github.com/artificialflow/artificialflow/backend/libs/metrics"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
+	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/domain/repository"
 	"strconv"
 	"time"
 )
@@ -22,6 +25,10 @@ func (e *Engine) CheckTimers(ctx context.Context) error {
 	dueTimers, err := e.repo.ListDueTimers(ctx, now)
 	if err != nil {
 		return err
+	}
+	for _, timer := range dueTimers {
+		metrics.SetWorkLag("workflow-runtime", "timer", now.Sub(timer.DueDate).Seconds())
+		break
 	}
 
 	var errs []error
@@ -41,6 +48,86 @@ func (e *Engine) CheckTimers(ctx context.Context) error {
 	// Also evaluate conditional catches/starts on the same scheduler tick.
 	if err := e.CheckConditionals(ctx); err != nil {
 		return err
+	}
+	return nil
+}
+
+// CheckTimersClaimed is the multi-active path. PostgreSQL atomically divides
+// due rows across replicas and every timer transition is fenced by owner and
+// generation through UpdateTimer.
+func (e *Engine) CheckTimersClaimed(ctx context.Context, owner string, ttl time.Duration, limit int) error {
+	startClaims, err := e.repo.ClaimRuntimeWork(ctx, "TIMER_START_SCAN", owner, ttl, 1)
+	if err != nil {
+		return err
+	}
+	if len(startClaims) > 0 {
+		metrics.RecordRuntimeClaim("work", "acquired")
+		startCtx := runtimeTenantContext(ctx, startClaims[0].TenantID)
+		if err := e.withTx(startCtx, func(txEngine *Engine) error {
+			if err := txEngine.repo.LockRuntimeWork(startCtx, startClaims[0]); err != nil {
+				return err
+			}
+			if err := txEngine.ensureTimerStartSchedules(startCtx); err != nil {
+				return err
+			}
+			return txEngine.repo.CompleteRuntimeWork(startCtx, startClaims[0], time.Second)
+		}); err != nil {
+			if errors.Is(err, repository.ErrLeaseLost) {
+				metrics.RecordRuntimeClaim("work", "stale")
+			}
+			return err
+		}
+	}
+	dueTimers, err := e.repo.ClaimDueTimers(ctx, owner, ttl, limit)
+	if err != nil {
+		return err
+	}
+	if len(dueTimers) > 0 {
+		metrics.SetWorkLag("workflow-runtime", "timer", time.Since(dueTimers[0].DueDate).Seconds())
+	}
+	var errs []error
+	for _, timer := range dueTimers {
+		metrics.RecordRuntimeClaim("timer", "acquired")
+		timer := timer
+		itemCtx := runtimeTenantContext(ctx, timer.TenantID)
+		if err := e.withTx(itemCtx, func(txEngine *Engine) error {
+			if err := txEngine.repo.LockClaimedTimer(itemCtx, timer.Key, owner, timer.ClaimGeneration); err != nil {
+				return err
+			}
+			return txEngine.processTimer(itemCtx, timer)
+		}); err != nil {
+			if errors.Is(err, repository.ErrLeaseLost) {
+				metrics.RecordRuntimeClaim("timer", "stale")
+			}
+			if releaseErr := e.repo.ReleaseTimerClaim(itemCtx, timer.Key, owner, timer.ClaimGeneration); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("release claimed timer: %w", releaseErr))
+			}
+			errs = append(errs, fmt.Errorf("failed to process claimed timer %d: %w", timer.Key, err))
+		}
+	}
+	claims, err := e.repo.ClaimRuntimeWork(ctx, "CONDITIONAL_SCAN", owner, ttl, 1)
+	if err != nil {
+		errs = append(errs, err)
+	} else if len(claims) > 0 {
+		metrics.RecordRuntimeClaim("work", "acquired")
+		claimCtx := runtimeTenantContext(ctx, claims[0].TenantID)
+		if err := e.withTx(claimCtx, func(txEngine *Engine) error {
+			if err := txEngine.repo.LockRuntimeWork(claimCtx, claims[0]); err != nil {
+				return err
+			}
+			if err := txEngine.CheckConditionals(claimCtx); err != nil {
+				return err
+			}
+			return txEngine.repo.CompleteRuntimeWork(claimCtx, claims[0], time.Second)
+		}); err != nil {
+			if errors.Is(err, repository.ErrLeaseLost) {
+				metrics.RecordRuntimeClaim("work", "stale")
+			}
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("claimed timer cycle errors: %v", errs)
 	}
 	return nil
 }
@@ -113,18 +200,11 @@ func (e *Engine) finalizeTimerAfterFire(ctx context.Context, timer *model.Timer,
 	return e.repo.UpdateTimer(ctx, timer)
 }
 
-func (e *Engine) cancelCreatedTimersForElementInstance(ctx context.Context, elementInstanceKey int64) {
+func (e *Engine) cancelCreatedTimersForElementInstance(ctx context.Context, elementInstanceKey, exceptTimerKey int64) error {
 	if elementInstanceKey == 0 {
-		return
+		return nil
 	}
-	timers, err := e.repo.ListCreatedTimersByElementInstanceKey(ctx, elementInstanceKey)
-	if err != nil {
-		return
-	}
-	for i := range timers {
-		timers[i].State = "CANCELED"
-		_ = e.repo.UpdateTimer(ctx, &timers[i])
-	}
+	return e.repo.CancelUnclaimedTimersForElement(ctx, elementInstanceKey, exceptTimerKey)
 }
 
 func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
@@ -168,7 +248,9 @@ func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
 				State:   "COMPLETED",
 				EndTime: time.Now(),
 			}
-			_ = e.repo.UpdateProcessInstance(ctx, pi)
+			if err := e.repo.UpdateProcessInstance(ctx, pi); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -187,11 +269,15 @@ func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
 		if exec != nil && exec.Status == "ACTIVE" {
 			if err := e.proceedToken(ctx, instance, exec.ID, wf); err == nil {
 				// Cancel siblings if this was an Event-Based Gateway
-				e.cancelEventGatewaySiblings(ctx, instance, step, exec.ParentID, wf)
+				if err := e.cancelEventGatewaySiblings(ctx, instance, step, exec.ParentID, wf); err != nil {
+					return err
+				}
 
 				// Intermediate catch consumes the token — one-shot even if cycle was modeled.
 				timer.State = "TRIGGERED"
-				_ = e.repo.UpdateTimer(ctx, &timer)
+				if err := e.repo.UpdateTimer(ctx, &timer); err != nil {
+					return err
+				}
 
 				// Engine: Check Completion
 				if instance.Status == model.StatusCompleted {
@@ -200,7 +286,9 @@ func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
 						State:   "COMPLETED",
 						EndTime: time.Now(),
 					}
-					e.repo.UpdateProcessInstance(ctx, pi)
+					if err := e.repo.UpdateProcessInstance(ctx, pi); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -237,7 +325,9 @@ func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
 						State:   "TERMINATED",
 						EndTime: time.Now(),
 					}
-					e.repo.UpdateElementInstance(ctx, el)
+					if err := e.repo.UpdateElementInstance(ctx, el); err != nil {
+						return err
+					}
 				}
 			}
 
@@ -274,19 +364,27 @@ func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
 					State:                "ACTIVATED",
 					CreatedAt:            time.Now(),
 				}
-				e.repo.CreateElementInstance(ctx, el)
+				if err := e.repo.CreateElementInstance(ctx, el); err != nil {
+					return err
+				}
 
 				instance.Executions = append(instance.Executions, newExec)
 
 				// Auto advance the new token
-				e.autoAdvance(ctx, instance, newExec.ID, wf)
+				if err := e.autoAdvance(ctx, instance, newExec.ID, wf); err != nil {
+					return err
+				}
 			}
 
 			if cancelActivity {
 				timer.State = "TRIGGERED"
-				_ = e.repo.UpdateTimer(ctx, &timer)
+				if err := e.repo.UpdateTimer(ctx, &timer); err != nil {
+					return err
+				}
 				// Cancel other boundary timers attached to the same activity.
-				e.cancelCreatedTimersForElementInstance(ctx, timer.ElementInstanceKey)
+				if err := e.cancelCreatedTimersForElementInstance(ctx, timer.ElementInstanceKey, timer.Key); err != nil {
+					return err
+				}
 			} else if err := e.finalizeTimerAfterFire(ctx, &timer, step.Properties); err != nil {
 				return err
 			}
@@ -298,7 +396,9 @@ func (e *Engine) processTimer(ctx context.Context, timer model.Timer) error {
 					State:   "COMPLETED",
 					EndTime: time.Now(),
 				}
-				e.repo.UpdateProcessInstance(ctx, pi)
+				if err := e.repo.UpdateProcessInstance(ctx, pi); err != nil {
+					return err
+				}
 			}
 
 		}
@@ -312,25 +412,21 @@ func (e *Engine) processTimerStartDefinition(ctx context.Context, timer model.Ti
 	defKey := timer.ElementInstanceKey
 	if defKey == 0 {
 		timer.State = "TRIGGERED"
-		_ = e.repo.UpdateTimer(ctx, &timer)
-		return nil
+		return e.repo.UpdateTimer(ctx, &timer)
 	}
 	wf, err := e.getWorkflowDefinition(ctx, defKey)
 	if err != nil || wf == nil {
 		timer.State = "TRIGGERED"
-		_ = e.repo.UpdateTimer(ctx, &timer)
-		return nil
+		return e.repo.UpdateTimer(ctx, &timer)
 	}
 	start := firstStartStep(wf.Steps)
 	if start == nil || start.ID != timer.ElementID {
 		timer.State = "TRIGGERED"
-		_ = e.repo.UpdateTimer(ctx, &timer)
-		return nil
+		return e.repo.UpdateTimer(ctx, &timer)
 	}
 	if start.Properties == nil || start.Properties["event_definition_type"] != "timer" {
 		timer.State = "TRIGGERED"
-		_ = e.repo.UpdateTimer(ctx, &timer)
-		return nil
+		return e.repo.UpdateTimer(ctx, &timer)
 	}
 	if _, err := e.createAndStartInstance(ctx, strconv.FormatInt(defKey, 10), nil, "", "", nil); err != nil {
 		return err
@@ -401,6 +497,9 @@ func (e *Engine) CheckSLAs(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(overdueJobs) > 0 {
+		metrics.SetWorkLag("workflow-runtime", "job", now.Sub(overdueJobs[0].DueDate).Seconds())
+	}
 
 	var errs []error
 	for _, job := range overdueJobs {
@@ -446,6 +545,61 @@ func (e *Engine) CheckSLAs(ctx context.Context) error {
 		return fmt.Errorf("errors processing SLAs: %v", errs)
 	}
 	return nil
+}
+
+func (e *Engine) CheckSLAsClaimed(ctx context.Context, owner string, ttl time.Duration, limit int) error {
+	overdueJobs, err := e.repo.ClaimOverdueJobs(ctx, owner, ttl, limit)
+	if err != nil {
+		return err
+	}
+	if len(overdueJobs) > 0 {
+		metrics.SetWorkLag("workflow-runtime", "job", time.Since(overdueJobs[0].DueDate).Seconds())
+	}
+	var errs []error
+	for _, job := range overdueJobs {
+		metrics.RecordRuntimeClaim("job", "acquired")
+		jobCopy := job
+		itemCtx := runtimeTenantContext(ctx, job.TenantID)
+		if err := e.withTx(itemCtx, func(txEngine *Engine) error {
+			now := time.Now().UTC()
+			jobCopy.BreachedAt = &now
+			jobCopy.UpdatedAt = now
+			if err := txEngine.repo.UpdateJob(itemCtx, &jobCopy); err != nil {
+				return err
+			}
+			incident := &model.Incident{
+				Key: generateDeterministicKey(fmt.Sprintf("sla_breach_%d", jobCopy.Key)),
+				ID:  id.GenerateUUIDv7(), ProcessInstanceKey: jobCopy.ProcessInstanceKey,
+				ElementInstanceKey: jobCopy.ElementInstanceKey, JobKey: jobCopy.Key,
+				ErrorType:    "SLA_DUE_DATE_BREACHED",
+				ErrorMessage: fmt.Sprintf("user-task due date breached for element %s", jobCopy.ElementID),
+				State:        "CREATED", CreatedAt: now,
+			}
+			if err := txEngine.repo.CreateIncident(itemCtx, incident); err != nil {
+				return err
+			}
+			return txEngine.publishEscalation(itemCtx, "user-task.due-date.breached", map[string]any{
+				"processInstanceKey": jobCopy.ProcessInstanceKey, "jobKey": jobCopy.Key,
+				"elementId": jobCopy.ElementID, "incidentKey": incident.Key,
+			})
+		}); err != nil {
+			if errors.Is(err, repository.ErrLeaseLost) {
+				metrics.RecordRuntimeClaim("job", "stale")
+			}
+			if releaseErr := e.repo.ReleaseJobClaim(itemCtx, job.Key, owner, job.ClaimGeneration); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("release claimed job: %w", releaseErr))
+			}
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("claimed SLA cycle errors: %v", errs)
+	}
+	return nil
+}
+
+func runtimeTenantContext(ctx context.Context, tenant string) context.Context {
+	return auth.WithPrincipal(ctx, auth.Principal{Subject: "workflow-runtime", TenantID: tenant})
 }
 
 // PublishSignal triggers a signal event across all active instances waiting for it.

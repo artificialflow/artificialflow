@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultTopicPartitions     = 1
+	defaultTopicPartitions     = 3
 	defaultTopicReplication    = 1
 	defaultTopicReadyTimeout   = 60 * time.Second
 	defaultTopicReadyPollEvery = 1 * time.Second
@@ -23,7 +23,8 @@ const (
 // each topic is visible with at least one partition. Fresh Debezium installs create
 // CDC topics asynchronously; kafka-go consumer groups that join before topics exist
 // can receive an empty assignment and never recover without a restart.
-func EnsureTopicsReady(ctx context.Context, brokers []string, topics []string, waitTimeout time.Duration) error {
+// Existing topics keep their partition count; partitions <= 0 uses the default.
+func EnsureTopicsReady(ctx context.Context, brokers []string, topics []string, partitions int, waitTimeout time.Duration) error {
 	normalized := uniqueTopics(topics)
 	if len(brokers) == 0 {
 		return fmt.Errorf("kafka brokers are required")
@@ -35,7 +36,10 @@ func EnsureTopicsReady(ctx context.Context, brokers []string, topics []string, w
 		waitTimeout = defaultTopicReadyTimeout
 	}
 
-	if err := createKafkaTopics(ctx, brokers, normalized); err != nil {
+	if partitions <= 0 {
+		partitions = defaultTopicPartitions
+	}
+	if err := createKafkaTopics(ctx, brokers, normalized, partitions); err != nil {
 		return err
 	}
 	return waitForKafkaTopics(ctx, brokers, normalized, waitTimeout)
@@ -74,7 +78,7 @@ func TopicsHaveBacklog(ctx context.Context, brokers []string, topics []string) (
 	return false, nil
 }
 
-func createKafkaTopics(ctx context.Context, brokers []string, topics []string) error {
+func createKafkaTopics(ctx context.Context, brokers []string, topics []string, partitions int) error {
 	controller, err := dialKafkaController(ctx, brokers)
 	if err != nil {
 		return err
@@ -85,7 +89,7 @@ func createKafkaTopics(ctx context.Context, brokers []string, topics []string) e
 	for _, topic := range topics {
 		configs = append(configs, kafka.TopicConfig{
 			Topic:             topic,
-			NumPartitions:     defaultTopicPartitions,
+			NumPartitions:     partitions,
 			ReplicationFactor: defaultTopicReplication,
 		})
 	}

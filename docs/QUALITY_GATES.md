@@ -22,7 +22,7 @@ Recommended required checks for default branch protection:
 | BPMN matrix | `make test-bpmn-matrix`. | CI job output or local command output. |
 | Frontend lint/test/build | `make test-frontend` for tests; CI also runs `npm --prefix frontend run lint` and `npm --prefix frontend run build`. | `reports/frontend-vitest.json`, `reports/frontend-vitest.txt`, build output. |
 | Node.js SDK validation | `npm --prefix clients/nodejs-sdk test`, `npm --prefix clients/nodejs-sdk run validate:package`, and dry-run packs for both canonical and legacy packages. | SDK test output, exact-version wrapper validation, dry-run package listings. |
-| Compose profiles | `make smoke-profiles` and `bash scripts/validate_compose_identities.sh`. | Canonical/legacy project, volume, image, and config validation output. |
+| Compose smoke | `make smoke` and `bash scripts/validate_compose_identities.sh`. | Canonical/legacy project, volume, image, and config validation output. |
 | Helm validation | `make validate-helm`. | Helm lint/templates plus fresh/legacy resource identity and immutable-selector assertions when Helm is installed; YAML parse validation otherwise. |
 | Docker build and image scan | CI Docker Build Dry Run and Trivy image scan. | Docker build logs and Trivy results. |
 | Security baseline | `.github/workflows/security.yml`. | Gitleaks, govulncheck, npm audit, gosec, Trivy filesystem, CodeQL where available. |
@@ -32,7 +32,7 @@ For lightweight local review, a maintainer or agent can start with:
 ```bash
 make test-unit
 make test-frontend
-make smoke-profiles
+make smoke
 make validate-helm
 ```
 
@@ -44,7 +44,7 @@ Run these when the changed surface warrants deeper confidence:
 | :--- | :--- | :--- |
 | Integration tests | `make test-integration` | API behavior depends on a running stack or cross-service behavior. |
 | Backend E2E | `make test-e2e` | CQRS, worker, command-to-query, or runtime lifecycle behavior changes. |
-| Full CQRS smoke | `make cqrs-e2e-smoke` | Event projection, Debezium/Kafka, sync worker, query visibility, or Elasticsearch/OpenSearch changes. |
+| Full CQRS smoke | `make cqrs-e2e-smoke` | Event projection, Debezium/Kafka, sync worker, query visibility, or Elasticsearch changes. |
 | CQRS parity | `make cqrs-parity-check` | Read model counts, index mappings, or projection replay behavior changes. |
 | Worker conformance | `make worker-conformance` | Worker API, SDK worker behavior, idempotency, headers, or job lifecycle changes. |
 | Performance | `make test-perf` | Throughput, query performance, worker activation, polling, large variables, or hot paths change. |
@@ -52,7 +52,7 @@ Run these when the changed surface warrants deeper confidence:
 | Exhaustive tester | `make test-all-functionality` | Maintainer-requested live validation across deployment, BPMN, API, SDK, UI, CQRS, worker, performance, and security surfaces. |
 | BPMN exhaustive catalog | `make test-bpmn-exhaustive` | BPMN parser/runtime semantics change or support status needs explicit scenario evidence. |
 | Deployment matrix | `make test-deployment-matrix` | Compose, IAM mode, CQRS profile, Helm, Docker, or release overlay behavior changes. |
-| Release profile smoke | `make smoke-release-profiles` | Docker Compose release overlays or image tag behavior changes. |
+| Release profile smoke | `make smoke-release` | Docker Compose release overlays or image tag behavior changes. |
 
 `make test-all` starts the full CQRS stack, runs unit/integration/E2E/frontend/performance/security layers, and writes `reports/summary.md`. Use `SKIP_PERF=true` or `SKIP_PLAYWRIGHT=true` only with an explicit reason.
 
@@ -60,7 +60,7 @@ Run these when the changed surface warrants deeper confidence:
 
 ## Release Gates
 
-Before a release candidate or `v0.4.0` / `1.0` train tag, run the unified suite:
+Before a release candidate or release tag, run the unified suite:
 
 ```bash
 make test-release-suite
@@ -76,8 +76,8 @@ cd tests/e2e/playwright && npx playwright test specs/uat-mega-bpmn.spec.ts
 Also:
 
 ```bash
-make smoke-profiles
-make smoke-release-profiles
+make smoke
+make smoke-release
 make validate-helm
 make validate-migration-release
 make release-dry-run
@@ -108,7 +108,7 @@ Security gates include:
 | DAST | `make test-dast` (OWASP ZAP baseline against live gateway). | Block unallowlisted High findings; allowlist in `tests/security/dast-allowlist.txt`. |
 | Dependency updates | Dependabot and dependency policy. | Require review for runtime, auth, parser, Docker, GitHub Actions, and release tooling changes. |
 
-SDK credential changes additionally require live JWT Profile exchange, role/audience validation, overlapping key rotation, removed-key rejection, bounded token lifetime, legacy PAT compatibility, and artifact redaction checks.
+SDK credential changes additionally require a live OAuth client-credentials exchange against an external OIDC provider, role/audience validation, client-secret rotation, token refresh before expiry, tokenless operation with `IAM_DEPLOYMENT_MODE=false`, and artifact redaction checks across the Node.js, .NET, and Java SDKs.
 
 Security agents must keep vulnerability details private when disclosure could harm users.
 

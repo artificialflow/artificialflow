@@ -1,4 +1,3 @@
-const fs = require('node:fs');
 const {
   ArtificialFlowClient,
   resolveArtificialFlowEnvironment,
@@ -10,29 +9,33 @@ function optionalValue(value) {
   return value && !value.startsWith('<') ? value : '';
 }
 
-function loadZitadelProfile(filename) {
-  try {
-    return JSON.parse(fs.readFileSync(filename, 'utf8'));
-  } catch {
-    throw new Error('Unable to load ARTIFICIALFLOW_ZITADEL_PROFILE_FILE.');
+function oauthAuthFromEnvironment() {
+  const tokenUrl = process.env.OIDC_TOKEN_URL || process.env.ARTIFICIALFLOW_OIDC_TOKEN_URL;
+  const clientId = process.env.OIDC_CLIENT_ID || process.env.ARTIFICIALFLOW_CLIENT_ID;
+  const clientSecret = process.env.OIDC_CLIENT_SECRET || process.env.ARTIFICIALFLOW_CLIENT_SECRET;
+  if (tokenUrl && clientId && clientSecret) {
+    return {
+      type: 'oauth-client-credentials',
+      profile: {
+        type: 'oauth-client-credentials',
+        tokenUrl,
+        clientId,
+        clientSecret,
+      },
+    };
   }
+  return undefined;
 }
 
 async function main() {
-  if (Boolean(config.token) === Boolean(config.zitadelProfileFile)) {
-    throw new Error('Set exactly one of ARTIFICIALFLOW_TOKEN or ARTIFICIALFLOW_ZITADEL_PROFILE_FILE.');
+  const auth = oauthAuthFromEnvironment();
+  if (config.token && auth) {
+    throw new Error('Set at most one of ARTIFICIALFLOW_TOKEN or OIDC_TOKEN_URL/OIDC_CLIENT_ID/OIDC_CLIENT_SECRET (none when IAM is disabled).');
   }
-
-  const auth = config.zitadelProfileFile
-    ? {
-      type: 'zitadel-jwt-profile',
-      profile: loadZitadelProfile(config.zitadelProfileFile),
-    }
-    : undefined;
 
   const client = new ArtificialFlowClient({
     baseUrl: config.baseUrl,
-    ...(auth ? { auth } : { token: config.token }),
+    ...(auth ? { auth } : config.token ? { token: config.token } : {}),
   });
 
   console.log('1. Checking current authenticated principal...');

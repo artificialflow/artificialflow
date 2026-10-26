@@ -1,11 +1,37 @@
 # ArtificialFlow HTTP API
 
-Integration guide for developers who call ArtificialFlow **directly over HTTP** —
-without the Node.js SDK — or who need to choose between the SDK and raw API
-integration.
+Integration guide for developers who call ArtificialFlow **directly over HTTP**
+(without the Node.js, .NET, or Java SDK) or who need to choose between an SDK
+and raw API integration.
 
 Stability of these surfaces is covered by [COMPATIBILITY_MATRIX.md](COMPATIBILITY_MATRIX.md)
 and [STABILITY_POLICY.md](STABILITY_POLICY.md).
+
+## Runtime tenancy and instance migration
+
+Protected requests are scoped to the tenant resolved from the trusted identity
+claim. In the default 1.x compatibility mode a missing claim resolves to
+`default`. A conflicting `X-Tenant-ID` assertion is rejected; request bodies
+cannot select a tenant. Foreign-tenant identifiers return the same `404` as an
+unknown identifier.
+
+Administrators can validate and apply the bounded migration subset:
+
+- `POST /api/instances/{id}/migration/dry-run`
+- `POST /api/instances/{id}/migration`
+
+Both accept `sourceDefinitionKey`, `targetDefinitionKey`, and an
+`elementMapping` object. The target must be a newer version in the same tenant
+and process lineage. Every active element, user task, timer, and message
+subscription must be mapped. Nested scopes, compensation, event subprocesses,
+multi-instance state, executing external work, and unresolved incidents are
+rejected with a stable `reasonCode`. Apply revalidates source definition,
+version, and active state in the transaction and writes an immutable audit
+event.
+
+The exact supported and rejected state combinations are maintained in
+[INSTANCE_MIGRATION.md](INSTANCE_MIGRATION.md). Treat that document as the
+release support matrix; behavior outside it is rejected rather than inferred.
 
 ## Documentation map
 
@@ -17,7 +43,7 @@ and [STABILITY_POLICY.md](STABILITY_POLICY.md).
 - [End-to-end quickstart](#quickstart-end-to-end)
 - [Command API](#command-api-reference)
 - [Worker/jobs API](#worker--jobs-api)
-- [Human-task Inbox API](#inbox-api)
+- [User tasks API](#user-tasks-api)
 - [Query API](#query-api-reference)
 - [Integration architectures](#integration-patterns)
 - [Production-readiness checklist](#production-integration-checklist)
@@ -29,12 +55,14 @@ and [STABILITY_POLICY.md](STABILITY_POLICY.md).
 
 | Situation | Recommended path |
 | :--- | :--- |
-| Java, .NET, Ruby, PHP, or any language without an official SDK | **HTTP API** (this document) |
+| Ruby, PHP, or any language without an official SDK | **HTTP API** (this document) |
 | Custom gateway, BFF, or ESB that already speaks REST | **HTTP API** |
-| Minimal dependency / air-gapped clients that cannot pull npm packages | **HTTP API** |
-| Node.js / TypeScript automation, workers, inbox BFF | [`@artificialflow/nodejs-sdk`](sdk-nodejs.md) |
-| Go external workers | [`backend/libs/worker`](../backend/libs/worker/README.md) |
-| Python workers (jobs only) | [`clients/python-sdk`](../clients/python-sdk/README.md) |
+| Minimal dependency / air-gapped clients that cannot pull SDK packages | **HTTP API** |
+| Node.js / TypeScript automation, workers, task apps | [`@artificialflow/nodejs-sdk`](sdk-nodejs.md) |
+| .NET automation, workers, task apps | [`ArtificialFlow.Sdk`](sdk-dotnet.md) |
+| Java automation, workers, task apps | [`artificialflow-sdk`](sdk-java.md) |
+| Python workers (jobs only) | [`artificialflow-worker`](sdk-python.md) |
+| Go workers (jobs only) | [`backend/libs/worker`](sdk-go.md) |
 | Human operators / process designers | ArtificialFlow console (UI), not raw API |
 
 The SDKs are thin clients over the same HTTP contract. Anything the SDK can do,
@@ -50,18 +78,25 @@ Helm.
 
 | Environment | Command (writes) | Query (reads) |
 | :--- | :--- | :--- |
-| Local Compose | `http://localhost:9100/api` | `http://localhost:9100/api/query` |
-| Production (example) | `https://app.example.com/api` | `https://app.example.com/api/query` |
-| Direct service (dev only) | `http://localhost:8080` | `http://localhost:8081` |
+| Local Compose | `http://localhost:9100/api/v1` | `http://localhost:9100/api/v1/query` |
+| Production (example) | `https://app.example.com/api/v1` | `https://app.example.com/api/v1/query` |
+| Direct service (dev only) | `http://localhost:8080/v1` | `http://localhost:8081/v1` |
+
+Every route is served twice:
+
+- **`/api/v1/...` (recommended):** errors are RFC 9457 Problem Details.
+- **`/api/...` (unversioned compatibility alias):** same handlers and payloads,
+  but errors keep their 1.x plain-text bodies.
 
 Gateway path rewriting:
 
-- `GET /api/health` → command `/health`
+- `POST /api/v1/instances` → command `/v1/instances`
+- `GET /api/v1/query/instances` → query `/v1/instances`
 - `POST /api/instances` → command `/instances`
 - `GET /api/query/instances` → query `/instances`
 
-There is **no `/v1` path prefix**. Compatibility is negotiated with headers
-(worker protocol) and SemVer platform releases.
+Worker compatibility is also negotiated with the
+`X-Workflow-Worker-Protocol-Version` header; platform releases follow SemVer.
 
 Public health (no auth):
 
@@ -75,8 +110,9 @@ curl -sS http://localhost:9100/api/query/health
 ## OpenAPI, Swagger UI, and API tools
 
 The machine-readable contract is checked in at
-[`docs/openapi.yaml`](openapi.yaml). It covers the supported gateway paths for
-the Command, Query, Worker, Inbox, and bundled-IAM management APIs. Treat the
+[`docs/openapi.yaml`](openapi.yaml) and served by the gateway at
+`/api/openapi.yaml`. It covers the supported gateway paths for
+the Command, Query, Worker, and User tasks APIs. Treat the
 checked-in document and this guide as the release contract.
 
 ### Recommended interactive documentation
@@ -105,19 +141,20 @@ npx @redocly/cli preview-docs docs/openapi.yaml
 
 Import `docs/openapi.yaml` into Postman, Insomnia, Bruno, or Stoplight and set:
 
-- `server` to `http://localhost:9100/api` for local Compose;
+- `server` to `http://localhost:9100/api/v1` for versioned local Compose routes
+  (`/api` remains an additive compatibility alias);
 - Bearer authentication to a short-lived machine access token;
 - worker header `X-Workflow-Worker-Protocol-Version: v1`;
 - an `Idempotency-Key` for job mutation requests.
 
 ### Runtime Swagger status
 
-The command service exposes a legacy Swaggo route at
+The command service exposes a deprecated legacy Swaggo route at
 `/api/swagger/index.html`. It requires API authentication and only includes
-handlers carrying Swaggo annotations, so it is not the complete `v1.1.0`
+handlers carrying Swaggo annotations, so it is not the complete API
 contract and should not be used for client generation. Use
-[`docs/openapi.yaml`](openapi.yaml) for complete tooling imports. A future
-release may serve that checked-in contract directly from the gateway.
+the gateway-served [`docs/openapi.yaml`](openapi.yaml) for complete tooling
+imports. The partial Swaggo route is scheduled for removal in `v1.3.0`.
 
 ### Contract validation
 
@@ -135,7 +172,17 @@ the compatibility and deprecation rules in
 
 ## Authentication
 
-All protected routes require:
+Authentication depends on the deployment's `IAM_DEPLOYMENT_MODE`
+(Helm: `iam.mode`). `GET /identity/config` reports it as the boolean
+`deployment_mode`.
+
+| `IAM_DEPLOYMENT_MODE` | API behavior |
+| :--- | :--- |
+| `true` (external OIDC; Helm default) | Every route except health requires `Authorization: Bearer <access-token>` issued by the configured provider. Roles come from the token. |
+| `false` (no IAM provider; Compose default) | No token is needed. Every request runs as the `artificialflowadmin` principal `local-disabled-auth` in tenant `default`. Any `Authorization` header is ignored. |
+
+Never expose a `false` deployment to untrusted networks: anyone who can reach
+the gateway has admin access. The rest of this section applies to `true`.
 
 ```http
 Authorization: Bearer <access-token>
@@ -144,20 +191,7 @@ Authorization: Bearer <access-token>
 ### Machine / integration identity
 
 Integrations must use a non-human identity with **only** the role
-`artificialflow client`.
-
-**Bundled ZITADEL**
-
-1. Sign in as `artificialflow admin`.
-2. Open **SDK Clients** in the console.
-3. Create a client and download the one-time service-account JSON profile.
-4. Exchange a short-lived JWT Profile assertion at the ZITADEL token URL for an
-   access token.
-5. Call ArtificialFlow with that access token only.
-
-See [iam.md](iam.md) and [sdk-nodejs.md](sdk-nodejs.md) for the JWT Profile
-assertion shape. Any language that can sign RS256 JWTs can implement the
-exchange.
+`artificialflowclient`.
 
 **External OIDC (client credentials)**
 
@@ -186,7 +220,7 @@ curl -sS http://localhost:9100/api/identity/me \
   "authenticated": true,
   "principal": {
     "subject": "…",
-    "roles": ["artificialflow client"],
+    "roles": ["artificialflowclient"],
     "email": "…",
     "name": "…"
   }
@@ -197,12 +231,12 @@ curl -sS http://localhost:9100/api/identity/me \
 
 | Role | Use for API integrations |
 | :--- | :--- |
-| `artificialflow client` | **Default for workers, automation, BFFs.** Start instances, jobs, messages/signals, query reads, inbox (with acting-user headers). |
-| `artificialflow modeler` | Deploy/list workflows and decisions. **Cannot** start instances or search projected instances. |
-| `artificialflow admin` | Platform ops: delete workflows/instances, incidents, job retry, admin task claim, metrics. **Do not** put admin on a long-lived SDK/worker client. |
+| `artificialflowclient` | **Default for workers, automation and task apps.** Start instances, variables, jobs, messages/signals/escalations, decision evaluation, user task search/claim/complete, query reads. |
+| `artificialflowbusiness` | Deploy/list workflows and decisions (modeler). **Cannot** start instances, read instances or edit variables. |
+| `artificialflowadmin` | Full access, including deletes, incidents, job retry, migrations and metrics. **Do not** put admin on a long-lived SDK/worker client. |
+| `artificialflowanalytics` | Reserved; no API access yet. |
 
-Do not combine `artificialflow client` and `artificialflow admin` on the same
-machine identity used for inbox BFFs — inbox rejects that combination.
+Authorization is role-only; token scopes are not checked.
 
 ---
 
@@ -212,37 +246,40 @@ machine identity used for inbox BFFs — inbox rejects that combination.
 
 | Header | When |
 | :--- | :--- |
-| `Authorization: Bearer …` | All protected routes |
+| `Authorization: Bearer …` | All protected routes when `IAM_DEPLOYMENT_MODE=true`; omit when `false` |
 | `Content-Type: application/json` | JSON bodies |
 | `Content-Type: application/xml` | BPMN deploy (`POST /workflows`) |
 | `X-Correlation-ID` | Optional request tracing |
 | `Idempotency-Key` | Job mutations (`complete` / `fail` / `extend-lock`), max 128 chars |
 | `X-Workflow-Worker-Protocol-Version` | Worker routes; send `v1` |
-| `X-ArtificialFlow-Acting-*` | Inbox BFF acting-user contract (see [Inbox](#inbox-api)) |
 
 Worker responses include `X-Workflow-Engine-Protocol-Version: v1`.
 
 ### Errors
 
-Errors are plain-text bodies from `http.Error` (not a structured JSON envelope):
+Versioned `/api/v1` errors use RFC 9457 Problem Details with
+`Content-Type: application/problem+json`, including stable `status`, `detail`,
+`instance`, and `correlationId` fields. Unversioned `/api` routes retain their
+plain-text `http.Error` bodies throughout the 1.x compatibility line.
 
 | Status | Typical meaning |
 | ---: | :--- |
 | `400` | Validation / bad id / unsupported protocol version |
-| `401` | Missing or invalid token |
-| `403` | Authenticated but wrong role / inbox acting-user rejected |
+| `401` | Missing or invalid token (`IAM_DEPLOYMENT_MODE=true` only) |
+| `403` | Authenticated but wrong role (`IAM_DEPLOYMENT_MODE=true` only) |
 | `404` | Unknown workflow / instance / job |
-| `409` | Conflict (e.g. task claim state) |
+| `409` | Conflict (e.g. task already claimed, or completed by a different assignee) |
 | `413` | BPMN body too large (limit ~20 MB) |
 | `500` | Server error |
 
-Treat non-2xx as failure; read the body for the message string.
+Treat non-2xx as failure. Versioned clients should branch on `status` and stable
+problem fields; compatibility clients may continue reading the plain-text body.
 
 ### Command vs query
 
 | Concern | Use |
 | :--- | :--- |
-| Deploy, start, cancel, jobs, inbox, messages | **Command** `/api/...` |
+| Deploy, start, cancel, jobs, user tasks, messages | **Command** `/api/...` |
 | Dashboard search, paginated instance lists | **Query** `/api/query/...` |
 
 Query is **eventually consistent** (CQRS projection). After a write, poll query
@@ -259,10 +296,11 @@ Query instance ids and `workflowId` filters must be **numeric** strings.
 
 ## Quickstart (end-to-end)
 
-Replace `$API` with `http://localhost:9100/api` and set `$TOKEN`.
+Replace `$API` with `http://localhost:9100/api/v1` and set `$TOKEN`. With
+`IAM_DEPLOYMENT_MODE=false`, drop the `Authorization` headers.
 
 ```bash
-export API=http://localhost:9100/api
+export API=http://localhost:9100/api/v1
 export TOKEN=…
 
 # 1. Verify identity
@@ -308,7 +346,7 @@ curl -sS "$API/query/instances?state=RUNNING&page=1&pageSize=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-A scripted bake-off that exercises deploy → start → worker → inbox lives at
+A scripted bake-off that exercises deploy → start → worker → user task lives at
 [`examples/golden-demo/run-bakeoff.mjs`](../examples/golden-demo/run-bakeoff.mjs).
 
 ---
@@ -317,47 +355,64 @@ A scripted bake-off that exercises deploy → start → worker → inbox lives a
 
 Base: `{gateway}/api`
 
-Roles: **A** = admin, **M** = modeler, **C** = client.
+Roles: **A** = admin, **B** = business, **C** = client.
 
 ### Identity
 
 #### `GET /identity/me`
 
-Auth: any valid token (or unauthenticated → `{ "authenticated": false }`).
+Any role. Returns `{ "authenticated": true, "principal": { … } }` for the
+caller. With `IAM_DEPLOYMENT_MODE=true` a missing or invalid token gets `401`;
+with `false` the principal is always `local-disabled-auth` with
+`artificialflowadmin`.
 
 #### `GET /identity/config`
 
-Returns deployment IAM settings (`deployment_mode`, issuer URLs, claim paths,
-`standard_roles`, …). Useful for BFFs that need to know how the stack is wired.
+Any role. Returns the deployment's IAM settings so a BFF or console can tell how
+the stack is wired. Secrets are never returned.
 
-Bundled-ZITADEL administration under `/identity/management/*` is intended for
-the ArtificialFlow console or trusted administrative automation. Every route
-requires `artificialflow admin`, is available only in bundled-ZITADEL mode, and
-must never be exposed to browser code carrying a machine credential.
+```json
+{
+  "deployment_mode": true,
+  "provider_name": "External OIDC Provider",
+  "auth_enabled": true,
+  "frontend_auth_enabled": true,
+  "frontend_oidc_authority": "https://login.example.com/realms/acme",
+  "frontend_oidc_client_id": "workflow-frontend",
+  "token_validation_mode": "jwt",
+  "internal_issuer_url": "https://login.example.com/realms/acme",
+  "external_issuer_url": "https://login.example.com/realms/acme",
+  "client_id": "workflow-backend",
+  "enforce_audience": true,
+  "claim_roles_path": "roles,realm_access.roles,groups",
+  "standard_roles": ["artificialflowadmin", "artificialflowbusiness", "artificialflowclient", "artificialflowanalytics"]
+}
+```
 
-| Method | Path | Purpose |
-| :--- | :--- | :--- |
-| `GET` | `/identity/management/clients` | List machine clients |
-| `POST` | `/identity/management/clients` | Create a client and one-time credential/profile |
-| `DELETE` | `/identity/management/clients/{id}` | Delete a machine client |
-| `POST` | `/identity/management/clients/{id}/tokens` | Rotate/create a client token |
-| `DELETE` | `/identity/management/clients/{id}/tokens/{tokenId}` | Revoke a token |
-| `POST` | `/identity/management/clients/{id}/keys` | Add a JWT Profile public key |
-| `DELETE` | `/identity/management/clients/{id}/keys/{keyId}` | Revoke a public key |
-| `GET` | `/identity/management/users` | List users |
-| `POST` | `/identity/management/users` | Create a user |
-| `PUT` | `/identity/management/users/{id}` | Update a user |
-| `DELETE` | `/identity/management/users/{id}` | Delete a user |
-| `POST` | `/identity/management/users/{id}/terminate` | Terminate a user session/account |
-| `POST` | `/identity/management/users/{id}/reactivate` | Reactivate a user |
-| `GET` | `/identity/management/roles` | List roles |
-| `POST` | `/identity/management/roles` | Create a custom role |
-| `PUT` | `/identity/management/roles/{roleKey}` | Update a role |
-| `DELETE` | `/identity/management/roles/{roleKey}` | Delete a custom role |
+`deployment_mode` is a boolean: `true` means an external OIDC provider, `false`
+means no IAM provider (`provider_name` defaults to `None` and the issuer and
+frontend fields are empty). Override the display name with `IAM_PROVIDER_NAME`. Users, SDK clients, and API tokens are created in the
+external OIDC provider; ArtificialFlow has no user-management API.
 
-Prefer the console **SDK Clients** page for human administrators. Credential
-creation and rotation responses can contain one-time secret material; do not
-log, cache, or return those responses through a browser-facing API.
+#### `POST /identity/login`
+
+Public. Console sign-in when `IAM_DEPLOYMENT_MODE=false`. Checks the body
+against `CONSOLE_ADMIN_USERNAME` / `CONSOLE_ADMIN_PASSWORD` (default
+`admin` / `admin`) and issues **no token**, because the API is already
+unauthenticated in that mode.
+
+```json
+{ "username": "admin", "password": "admin" }
+```
+
+| Status | Meaning |
+| ---: | :--- |
+| `200` | `{ "authenticated": true, "principal": { "subject": "admin", "roles": ["artificialflowadmin"], … } }` |
+| `400` | Malformed body or unknown fields |
+| `401` | Wrong username or password |
+| `404` | `IAM_DEPLOYMENT_MODE=true`: sign in through the OIDC provider instead (without a token the auth check answers `401` first) |
+
+Integrations never need this endpoint.
 
 ---
 
@@ -367,7 +422,7 @@ log, cache, or return those responses through a browser-facing API.
 
 | | |
 | :--- | :--- |
-| Roles | A \| M \| C |
+| Roles | A \| B \| C |
 | Body | Raw BPMN 2.0 XML |
 | Content-Type | `application/xml` |
 | Max size | ~20 MB |
@@ -403,11 +458,11 @@ before claiming compatibility.
 
 #### `GET /workflows`
 
-Roles: A \| M \| C. Returns an array of workflow definitions.
+Roles: A \| B \| C. Returns an array of workflow definitions.
 
 #### `GET /workflows/{id}`
 
-Roles: A \| M \| C. `{id}` may be the numeric definition key or BPMN process id.
+Roles: A \| B \| C. `{id}` may be the numeric definition key or BPMN process id.
 
 #### `DELETE /workflows/{id}`
 
@@ -470,16 +525,16 @@ See [PROCESS_VERSIONING.md](PROCESS_VERSIONING.md).
 
 #### `GET /instances`
 
-Roles: A \| C (modeler-only principals are blocked). Active instances from the
+Roles: A \| C. Active instances from the
 command store (authoritative, not the search projection).
 
 #### `GET /instances/history/completed?limit=`
 
-Roles: scoped instance read. Default/capped limit 100.
+Roles: A \| C. Default/capped limit 100.
 
 #### `GET /instances/{id}`
 
-Roles: scoped instance read. Full instance + executions + task metadata.
+Roles: A \| C. Full instance + executions + task metadata.
 
 #### `DELETE /instances/{id}`
 
@@ -495,8 +550,8 @@ Roles: A \| C.
 
 #### `POST /instances/{id}/complete`
 
-Roles: A \| C. Legacy step completion by `step_id` — **not** the human-task inbox
-path.
+Roles: A \| C. Legacy step completion by `step_id` — **not** the user task
+claim/complete path.
 
 ```json
 { "step_id": "Activity_1" }
@@ -504,22 +559,15 @@ path.
 
 #### `GET /instances/{id}/tasks?includeCompleted=`
 
-Roles: scoped instance read.
+Roles: A \| C. User tasks of one instance; see [User tasks API](#user-tasks-api).
 
 ```json
 { "tasks": [ /* UserTaskResponse */ ] }
 ```
 
-#### Admin task ops (console)
+#### `GET /instances/{id}/jobs`
 
-| Method | Path | Roles |
-| :--- | :--- | :--- |
-| `POST` | `/instances/{id}/tasks/{executionId}/claim` | A |
-| `POST` | `/instances/{id}/tasks/{executionId}/complete` | A |
-| `GET` | `/instances/{id}/jobs` | A |
-
-Human-task apps for end users should use the [Inbox API](#inbox-api), not these
-admin routes.
+Roles: A.
 
 ---
 
@@ -567,7 +615,7 @@ tasks. Details: [DMN.md](DMN.md).
 
 #### `POST /decisions`
 
-Roles: A \| M \| C.
+Roles: A \| B \| C.
 
 ```json
 {
@@ -616,8 +664,9 @@ Roles: A \| C. `{id}` is the decision id (e.g. `invoice_decision`).
 | Method | Path | Roles | Notes |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/incidents?processInstanceKey=&limit=` | A | Default limit 100 |
-| `POST` | `/jobs/{key}/retry` | A | Optional body `{ "retries": 3 }` |
-| `GET` | `/internal/metrics` | A | Outbox + idempotency counters |
+| `POST` | `/incidents/{key}/resolve` | A | Returns the resolved `IncidentResponse`; audited |
+| `POST` | `/jobs/{key}/retry` | A | Optional body `{ "retries": 3 }`; audited |
+| `GET` | `/internal/metrics` | A | Outbox + idempotency counters. The gateway answers `404`; call the command service directly (port `8080`) from inside the cluster or Compose network |
 
 `IncidentResponse`:
 
@@ -766,70 +815,70 @@ gRPC `JobWorkerService` exists on the command process (`GRPC_ADDR`, default
 
 ---
 
-## Inbox API
+## User tasks API
 
-Human-task integration for end-user applications. Prefer a **trusted BFF** that
-holds the `artificialflow client` token server-side and never exposes it to the
-browser.
-
-### Acting-user headers
-
-When the Bearer principal is `artificialflow client` (and not admin), the BFF
-**must** send the signed-in human identity:
-
-| Header | Purpose |
-| :--- | :--- |
-| `X-ArtificialFlow-Acting-Subject` | Stable user id (preferred) |
-| `X-ArtificialFlow-Acting-Username` | Username (used as subject fallback) |
-| `X-ArtificialFlow-Acting-Email` | Email (subject **or** email required) |
-| `X-ArtificialFlow-Acting-Name` | Display name |
-| `X-ArtificialFlow-Acting-Roles` | Comma-separated roles / candidate groups |
-
-Acting principals must **not** carry `artificialflow admin` or
-`artificialflow client`. Candidate-group matching uses acting roles.
-
-Browser Task Inbox humans (no platform roles) act as themselves without these
-headers.
+ArtificialFlow does not authenticate the end users of your applications. Your
+application signs them in with its own IAM and validates their tokens. Its
+backend then calls ArtificialFlow with an `artificialflowclient` token and
+passes the end user's identity as plain values: filters on search, `assignee`
+on claim and complete. Never expose the client token to the browser.
 
 ### Routes
 
-| Method | Path | Notes |
-| :--- | :--- | :--- |
-| `GET` | `/inbox` | Active instances visible to the acting user |
-| `GET` | `/inbox/history?limit=` | Completed history |
-| `GET` | `/inbox/instances/{id}?includeCompleted=` | Instance + task metadata |
-| `GET` | `/inbox/instances/{id}/tasks?includeCompleted=` | `{ "tasks": […] }` |
-| `POST` | `/inbox/instances/{id}/tasks/{executionId}/claim` | → `UserTaskResponse` |
-| `POST` | `/inbox/instances/{id}/tasks/{executionId}/complete` | Claimant must complete |
+| Method | Path | Roles | Notes |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/tasks` | A \| C | Search tasks across instances |
+| `GET` | `/instances/{id}/tasks?includeCompleted=` | A \| C | Tasks of one instance |
+| `POST` | `/instances/{id}/tasks/{executionId}/claim` | A \| C | Body `{ "assignee": "…" }` → `UserTaskResponse` |
+| `POST` | `/instances/{id}/tasks/{executionId}/complete` | A \| C | Body `{ "assignee": "…" }` → `204` |
 
-### Example (BFF)
+### `GET /tasks`
+
+| Query param | Notes |
+| :--- | :--- |
+| `assignee` | Tasks assigned to or claimed by this user |
+| `candidateUser` | Tasks this user may act on: assignee, claim owner or candidate user |
+| `candidateGroup` | Repeatable or comma-separated; tasks offered to any of these groups |
+| `includeUnassigned` | `true` also returns open tasks with no assignee, candidates or claim |
+| `processInstanceKey` | Restrict to one instance |
+| `state` | `active` (default), `completed`, `all` |
+| `limit` | 1–500, default 100 |
+
+`assignee`, `candidateUser` and `candidateGroup` are OR-combined. With none of
+them, every task in the tenant matches. Matching is case-insensitive.
+
+### Claim and complete
+
+Client tokens must send `assignee`. Admin tokens may omit it to act as
+themselves (email, then subject, then name) and may reassign a claimed task.
+Completing requires the same assignee that claimed the task unless the caller
+is an admin. Unknown body fields are rejected with `400`; an unknown task
+returns `404`; a task already claimed by someone else, or not yet claimed,
+returns `409`.
+
+### Example
 
 ```bash
-curl -sS "$API/inbox" \
-  -H "Authorization: Bearer $CLIENT_TOKEN" \
-  -H "X-ArtificialFlow-Acting-Subject: user-42" \
-  -H "X-ArtificialFlow-Acting-Username: approver" \
-  -H "X-ArtificialFlow-Acting-Email: approver@example.com" \
-  -H "X-ArtificialFlow-Acting-Roles: approvers"
+curl -sS "$API/tasks?candidateUser=approver@example.com&candidateGroup=approvers&includeUnassigned=true" \
+  -H "Authorization: Bearer $CLIENT_TOKEN"
 
 curl -sS -X POST \
-  "$API/inbox/instances/$INSTANCE_ID/tasks/$EXECUTION_ID/claim" \
+  "$API/instances/$INSTANCE_ID/tasks/$EXECUTION_ID/claim" \
   -H "Authorization: Bearer $CLIENT_TOKEN" \
-  -H "X-ArtificialFlow-Acting-Subject: user-42" \
-  -H "X-ArtificialFlow-Acting-Username: approver" \
-  -H "X-ArtificialFlow-Acting-Roles: approvers"
+  -H "Content-Type: application/json" \
+  -d '{ "assignee": "approver@example.com" }'
 
 curl -sS -X POST \
-  "$API/inbox/instances/$INSTANCE_ID/tasks/$EXECUTION_ID/complete" \
+  "$API/instances/$INSTANCE_ID/tasks/$EXECUTION_ID/complete" \
   -H "Authorization: Bearer $CLIENT_TOKEN" \
-  -H "X-ArtificialFlow-Acting-Subject: user-42" \
-  -H "X-ArtificialFlow-Acting-Username: approver" \
-  -H "X-ArtificialFlow-Acting-Roles: approvers"
+  -H "Content-Type: application/json" \
+  -d '{ "assignee": "approver@example.com" }'
 ```
 
-`UserTaskResponse` fields: `key`, `elementId`, `executionId`, `state`,
-`assignee`, `candidateUsers`, `candidateGroups`, `claimedBy`, `canClaim`,
-`canComplete`, `dueDate`, `createdAt`, `updatedAt`.
+`UserTaskResponse` fields: `key`, `processInstanceKey`, `processDefinitionKey`,
+`elementId`, `executionId`, `state`, `assignee`, `candidateUsers`,
+`candidateGroups`, `claimedBy`, `canClaim`, `canComplete`, `dueDate`,
+`createdAt`, `updatedAt`.
 
 ---
 
@@ -867,7 +916,7 @@ Roles: A \| C.
 ```
 
 Projected instances omit the rich `executions` / task tree. Use command
-`GET /instances/{id}` or inbox routes for task detail.
+`GET /instances/{id}` or `GET /tasks` for task detail.
 
 ### `GET /query/instances/{id}`
 
@@ -875,7 +924,7 @@ Roles: A \| C. `{id}` must be a numeric int64 string.
 
 ### `GET /query/workflows`
 
-Roles: A \| M \| C. Paginated (`page`, `pageSize`). Omits `bpmn_xml` / `steps`.
+Roles: A \| B \| C. Paginated (`page`, `pageSize`). Omits `bpmn_xml` / `steps`.
 
 ```json
 {
@@ -903,7 +952,7 @@ Roles: A \| M \| C. Paginated (`page`, `pageSize`). Omits `bpmn_xml` / `steps`.
 ### 1. Language-agnostic process client
 
 ```
-Obtain machine token (client credentials or JWT Profile)
+Obtain machine token (OAuth client credentials; skip when IAM_DEPLOYMENT_MODE=false)
         │
         ▼
 POST /workflows  (optional CI deploy)
@@ -925,12 +974,12 @@ default connector types such as `io.artificialflow.connector.http`).
 ### 3. Human-task BFF
 
 ```
-Browser ──OIDC──► Your BFF ──Bearer client token──► /inbox*
-                      │
-                      └── Acting-user headers from the signed-in session
+Browser ──your IAM──► Your backend ──Bearer client token──► GET /tasks, claim, complete
+                          │
+                          └── end user's id/groups from your own validated session
 ```
 
-Never ship the machine token or private key to the browser.
+Never ship the machine token or client secret to the browser.
 
 ### 4. Decision tables from CI
 
@@ -939,10 +988,10 @@ Deploy JSON tables with `POST /decisions`, then reference
 
 ### 5. When an SDK is still better
 
-Use `@artificialflow/nodejs-sdk` when you want built-in token refresh (ZITADEL
-JWT Profile), worker loop helpers, typed methods, and inbox acting-user wiring
-without reimplementing them. The SDK base URL is the same gateway
-`…/api`.
+Use the [Node.js](sdk-nodejs.md), [.NET](sdk-dotnet.md), or
+[Java](sdk-java.md) SDK when you want built-in token refresh, worker loop
+helpers, and typed methods without reimplementing
+them. The SDK base URL is the same gateway `…/api`.
 
 ---
 
@@ -950,8 +999,8 @@ without reimplementing them. The SDK base URL is the same gateway
 
 ### Identity and secrets
 
-- Use a dedicated machine identity with only `artificialflow client`.
-- Keep client secrets and JWT Profile private keys in a secret manager.
+- Use a dedicated machine identity with only `artificialflowclient`.
+- Keep client secrets in a secret manager.
 - Obtain short-lived tokens server-side; never store a machine token in browser
   JavaScript or mobile application storage.
 - Validate issuer and audience in production. Do not enable insecure issuer
@@ -1013,27 +1062,32 @@ without reimplementing them. The SDK base URL is the same gateway
 | Method | Path | Roles |
 | :--- | :--- | :--- |
 | `GET` | `/health` | public |
-| `GET` | `/identity/me` | auth |
-| `GET` | `/identity/config` | auth |
-| `POST` | `/workflows` | A\|M\|C |
-| `GET` | `/workflows` | A\|M\|C |
-| `GET` | `/workflows/{id}` | A\|M\|C |
+| `GET` | `/identity/me` | any role |
+| `GET` | `/identity/config` | any role |
+| `POST` | `/identity/login` | public; `IAM_DEPLOYMENT_MODE=false` only |
+| `POST` | `/workflows` | A\|B\|C |
+| `GET` | `/workflows` | A\|B\|C |
+| `GET` | `/workflows/{id}` | A\|B\|C |
 | `DELETE` | `/workflows/{id}` | A |
-| `POST` | `/decisions` | A\|M\|C |
-| `GET` | `/decisions` | A\|M\|C |
+| `POST` | `/decisions` | A\|B\|C |
+| `GET` | `/decisions` | A\|B\|C |
 | `POST` | `/decisions/{id}/evaluate` | A\|C |
 | `POST` | `/instances` | A\|C |
-| `GET` | `/instances` | scoped |
-| `GET` | `/instances/history/completed` | scoped |
-| `GET` | `/instances/{id}` | scoped |
+| `GET` | `/instances` | A\|C |
+| `GET` | `/instances/history/completed` | A\|C |
+| `GET` | `/instances/{id}` | A\|C |
 | `DELETE` | `/instances/{id}` | A |
+| `POST` | `/instances/{id}/migration/dry-run` | A |
+| `POST` | `/instances/{id}/migration` | A |
 | `POST` | `/instances/{id}/variables` | A\|C |
 | `POST` | `/instances/{id}/complete` | A\|C |
-| `GET` | `/instances/{id}/tasks` | scoped |
-| `POST` | `/instances/{id}/tasks/{executionId}/claim` | A |
-| `POST` | `/instances/{id}/tasks/{executionId}/complete` | A |
+| `GET` | `/tasks` | A\|C |
+| `GET` | `/instances/{id}/tasks` | A\|C |
+| `POST` | `/instances/{id}/tasks/{executionId}/claim` | A\|C |
+| `POST` | `/instances/{id}/tasks/{executionId}/complete` | A\|C |
 | `GET` | `/instances/{id}/jobs` | A |
 | `GET` | `/incidents` | A |
+| `POST` | `/incidents/{key}/resolve` | A |
 | `POST` | `/jobs/{key}/retry` | A |
 | `POST` | `/signals` | A\|C |
 | `POST` | `/messages` | A\|C |
@@ -1043,23 +1097,20 @@ without reimplementing them. The SDK base URL is the same gateway
 | `POST` | `/jobs/{key}/complete` | A\|C |
 | `POST` | `/jobs/{key}/fail` | A\|C |
 | `POST` | `/jobs/{key}/extend-lock` | A\|C |
-| `GET` | `/inbox` | inbox |
-| `GET` | `/inbox/history` | inbox |
-| `GET` | `/inbox/instances/{id}` | inbox |
-| `GET` | `/inbox/instances/{id}/tasks` | inbox |
-| `POST` | `/inbox/instances/{id}/tasks/{executionId}/claim` | inbox |
-| `POST` | `/inbox/instances/{id}/tasks/{executionId}/complete` | inbox |
-| `GET` | `/internal/metrics` | A |
+| `GET` | `/internal/metrics` | A (not routed by the gateway) |
+
+Roles assume `IAM_DEPLOYMENT_MODE=true`; with `false` every call runs as admin.
+Each path is also served under `/api/v1`.
 
 ### Query (`/api/query`)
 
 | Method | Path | Roles |
 | :--- | :--- | :--- |
 | `GET` | `/health` | public |
-| `GET` | `/identity/me` | auth |
+| `GET` | `/identity/me` | any role |
 | `GET` | `/instances` | A\|C |
 | `GET` | `/instances/{id}` | A\|C |
-| `GET` | `/workflows` | A\|M\|C |
+| `GET` | `/workflows` | A\|B\|C |
 
 ---
 
@@ -1067,8 +1118,12 @@ without reimplementing them. The SDK base URL is the same gateway
 
 | Doc | Topic |
 | :--- | :--- |
-| [iam.md](iam.md) | Roles, OIDC, ZITADEL |
-| [sdk-nodejs.md](sdk-nodejs.md) | Official Node client |
+| [iam.md](iam.md) | IAM modes, roles, and external OIDC |
+| [sdk-nodejs.md](sdk-nodejs.md) | Official Node.js client |
+| [sdk-dotnet.md](sdk-dotnet.md) | Official .NET client |
+| [sdk-java.md](sdk-java.md) | Official Java client |
+| [sdk-python.md](sdk-python.md) | Python worker client |
+| [sdk-go.md](sdk-go.md) | Go worker client |
 | [worker-api.md](worker-api.md) | Worker protocol summary |
 | [DMN.md](DMN.md) | Decision tables |
 | [PROCESS_VERSIONING.md](PROCESS_VERSIONING.md) | Start by id / version |

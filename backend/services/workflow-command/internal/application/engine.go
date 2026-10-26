@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	pb "github.com/artificialflow/artificialflow/backend/api/v1/go"
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/id"
+	"github.com/artificialflow/artificialflow/backend/libs/metrics"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/domain/repository"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/infrastructure/messaging"
@@ -14,8 +16,11 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -34,6 +39,17 @@ type Engine struct {
 	eventPublisher    messaging.EventPublisher
 	metrics           *engineMetrics
 	outboxMaxAttempts int
+	flushAfterCommit  bool
+	outboxPending     *outboxPendingCache
+}
+
+// outboxPendingCache is shared by pointer so transactional Engine copies reuse
+// the same lock and cached count.
+type outboxPendingCache struct {
+	mu       sync.Mutex
+	value    int64
+	at       time.Time
+	counting bool
 }
 
 type ServiceTaskHandler func(ctx context.Context, instance *model.WorkflowInstance, step *model.StepDefinition) error
@@ -44,6 +60,7 @@ type bufferedEvent struct {
 	eventType       string
 	outboxID        string
 	outboxCreatedAt time.Time
+	envelope        messaging.EventEnvelope
 }
 
 type OutboxRelayResult struct {
@@ -58,13 +75,21 @@ type IdempotencyCleanupResult struct {
 	Deleted int64
 }
 
+type OutboxCleanupResult struct {
+	Cutoff  time.Time
+	Deleted int64
+}
+
 const (
 	outboxStatusPending            = "PENDING"
 	outboxFlushBatchSize           = 200
 	outboxBaseRetryDelay           = time.Second
 	outboxMaxRetryDelay            = 5 * time.Minute
+	outboxClaimTTL                 = 5 * time.Minute
 	outboxMaxErrorLength           = 2048
 	defaultOutboxMaxAttempts       = 10
+	outboxPendingRefreshInterval   = 10 * time.Second
+	defaultOutboxCleanupBatch      = 5000
 	defaultIdempotencyCleanupBatch = 500
 )
 
@@ -113,6 +138,8 @@ func NewEngine(repo repository.Repository, eventPublisher messaging.EventPublish
 		eventPublisher:    eventPublisher,
 		metrics:           newEngineMetrics(),
 		outboxMaxAttempts: defaultOutboxMaxAttempts,
+		flushAfterCommit:  true,
+		outboxPending:     &outboxPendingCache{},
 	}
 	if ds, ok := repo.(decisionStore); ok {
 		e.decisions = ds
@@ -130,6 +157,13 @@ func (e *Engine) SetOutboxMaxAttempts(maxAttempts int) {
 		maxAttempts = defaultOutboxMaxAttempts
 	}
 	e.outboxMaxAttempts = maxAttempts
+}
+
+// SetFlushOutboxAfterCommit controls synchronous post-commit delivery. Runtime
+// services disable it and use the durable relay, keeping broker and outbox I/O
+// off latency-sensitive command transactions.
+func (e *Engine) SetFlushOutboxAfterCommit(enabled bool) {
+	e.flushAfterCommit = enabled
 }
 
 func (e *Engine) OutboxMaxAttempts() int {
@@ -164,6 +198,49 @@ func (e *Engine) RunIdempotencyCleanup(ctx context.Context, ttl time.Duration, l
 	result.Cutoff = cutoff
 	result.Deleted = deleted
 	return result, nil
+}
+
+func (e *Engine) RunOutboxCleanup(ctx context.Context, retention time.Duration, limit int) (OutboxCleanupResult, error) {
+	result := OutboxCleanupResult{}
+	if retention <= 0 {
+		return result, nil
+	}
+	if limit <= 0 {
+		limit = defaultOutboxCleanupBatch
+	}
+	cutoff := time.Now().UTC().Add(-retention)
+	deleted, err := e.repo.DeletePublishedOutboxMessagesBefore(ctx, cutoff, limit)
+	if err != nil {
+		return result, fmt.Errorf("delete published outbox messages before %s: %w", cutoff.Format(time.RFC3339), err)
+	}
+	result.Cutoff = cutoff
+	result.Deleted = deleted
+	return result, nil
+}
+
+func (e *Engine) RunClaimedIdempotencyCleanup(
+	ctx context.Context,
+	claim model.RuntimeClaim,
+	retention time.Duration,
+	limit int,
+	nextDelay time.Duration,
+) (IdempotencyCleanupResult, error) {
+	var result IdempotencyCleanupResult
+	err := e.withTx(ctx, func(txEngine *Engine) error {
+		if err := txEngine.repo.LockRuntimeWork(ctx, claim); err != nil {
+			return err
+		}
+		cleanupResult, err := txEngine.RunIdempotencyCleanup(ctx, retention, limit)
+		if err != nil {
+			return err
+		}
+		if err := txEngine.repo.CompleteRuntimeWork(ctx, claim, nextDelay); err != nil {
+			return err
+		}
+		result = cleanupResult
+		return nil
+	})
+	return result, err
 }
 
 func (e *Engine) StartInstance(ctx context.Context, workflowID string, contextVars map[string]any) (*model.WorkflowInstance, error) {
@@ -450,7 +527,6 @@ func (e *Engine) completeExecution(ctx context.Context, instanceID string, execu
 
 func (e *Engine) withTx(ctx context.Context, fn func(txEngine *Engine) error) error {
 	txPublisher := &transactionalEventPublisher{}
-	var outboxEvents []bufferedEvent
 	err := e.repo.WithTx(ctx, func(txRepo repository.Repository) error {
 		txEngine := *e
 		txEngine.repo = txRepo
@@ -462,20 +538,20 @@ func (e *Engine) withTx(ctx context.Context, fn func(txEngine *Engine) error) er
 			return err
 		}
 
-		persisted, err := e.persistBufferedEventsToOutbox(ctx, txRepo, txPublisher.Events())
+		_, err := e.persistBufferedEventsToOutbox(ctx, txRepo, txPublisher.Events())
 		if err != nil {
 			return err
 		}
-		outboxEvents = persisted
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 
-	e.flushBufferedEvents(ctx, outboxEvents)
-	if _, err := e.flushPendingOutbox(context.Background(), outboxFlushBatchSize); err != nil {
-		fmt.Printf("failed to flush pending outbox after commit: %v\n", err)
+	if e.flushAfterCommit {
+		if _, err := e.flushPendingOutbox(context.Background(), outboxFlushBatchSize); err != nil {
+			fmt.Printf("failed to flush pending outbox after commit: %v\n", err)
+		}
 	}
 	return nil
 }
@@ -495,53 +571,49 @@ func (e *Engine) persistBufferedEventsToOutbox(ctx context.Context, txRepo repos
 		}
 
 		outboxID := id.GenerateUUIDv7()
-		createdAt := time.Now()
+		createdAt := time.Now().UTC()
+		aggregateType, aggregateID := messaging.AggregateIdentity(persisted[i].event)
+		traceCarrier := propagation.MapCarrier{}
+		eventCtx := persisted[i].ctx
+		if eventCtx == nil {
+			eventCtx = ctx
+		}
+		otel.GetTextMapPropagator().Inject(eventCtx, traceCarrier)
+		traceContext, err := json.Marshal(map[string]string(traceCarrier))
+		if err != nil {
+			return nil, fmt.Errorf("marshal trace context: %w", err)
+		}
+		envelope := messaging.EventEnvelope{
+			EventID: outboxID, TenantID: auth.TenantIDFromContext(ctx),
+			EventType: persisted[i].eventType, AggregateType: aggregateType,
+			AggregateID: aggregateID, SchemaVersion: 1, OccurredAt: createdAt,
+			TraceContext: map[string]string(traceCarrier),
+		}
 		if err := txRepo.CreateOutboxMessage(ctx, &model.OutboxMessage{
-			ID:          outboxID,
-			EventType:   persisted[i].eventType,
-			Payload:     payload,
-			Status:      outboxStatusPending,
-			Attempts:    0,
-			LastError:   "",
-			NextAttempt: nil,
-			CreatedAt:   createdAt,
+			ID:            outboxID,
+			EventType:     persisted[i].eventType,
+			TenantID:      envelope.TenantID,
+			AggregateType: aggregateType,
+			AggregateID:   aggregateID,
+			SchemaVersion: 1,
+			OccurredAt:    createdAt,
+			TraceContext:  traceContext,
+			Payload:       payload,
+			Status:        outboxStatusPending,
+			Attempts:      0,
+			LastError:     "",
+			NextAttempt:   nil,
+			CreatedAt:     createdAt,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to persist outbox message for %s: %w", persisted[i].eventType, err)
 		}
 
 		persisted[i].outboxID = outboxID
 		persisted[i].outboxCreatedAt = createdAt
+		persisted[i].envelope = envelope
 	}
 
 	return persisted, nil
-}
-
-func (e *Engine) flushBufferedEvents(ctx context.Context, events []bufferedEvent) {
-	if e.eventPublisher == nil || len(events) == 0 {
-		return
-	}
-
-	for _, ev := range events {
-		eventCtx := ev.ctx
-		if eventCtx == nil {
-			eventCtx = ctx
-		}
-		if err := e.eventPublisher.Publish(eventCtx, ev.event, ev.eventType); err != nil {
-			fmt.Printf("failed to publish %s after commit: %v\n", ev.eventType, err)
-			e.recordOutboxPublishFailure(context.Background(), ev.outboxID, 1, err)
-			continue
-		}
-
-		if ev.outboxID != "" {
-			publishedAt := time.Now()
-			if err := e.repo.MarkOutboxMessagePublished(context.Background(), ev.outboxID, publishedAt); err != nil {
-				fmt.Printf("failed to mark outbox message %s as published: %v\n", ev.outboxID, err)
-				e.recordOutboxPublishFailure(context.Background(), ev.outboxID, 1, err)
-				continue
-			}
-			e.recordOutboxPublishSuccess(ev.outboxCreatedAt, publishedAt)
-		}
-	}
 }
 
 func (e *Engine) RunOutboxRelayCycle(ctx context.Context, limit int) (OutboxRelayResult, error) {
@@ -554,61 +626,137 @@ func (e *Engine) flushPendingOutbox(ctx context.Context, limit int) (OutboxRelay
 		return result, nil
 	}
 	now := time.Now()
-	pending, err := e.repo.CountPendingOutboxMessages(ctx, now)
-	if err != nil {
-		return result, fmt.Errorf("count pending outbox messages: %w", err)
-	}
+	pending, _ := e.cachedPendingOutboxMessages(ctx, now)
 	result.Pending = pending
 	if e.metrics != nil {
 		e.metrics.setOutboxPending(pending)
 	}
 
-	messages, err := e.repo.ListPendingOutboxMessages(ctx, now, limit)
+	claimOwner := "outbox-" + id.GenerateUUIDv7()
+	messages, err := e.repo.ClaimOutboxMessages(ctx, claimOwner, outboxClaimTTL, limit)
 	if err != nil {
-		return result, fmt.Errorf("list pending outbox messages: %w", err)
+		return result, fmt.Errorf("claim pending outbox messages: %w", err)
+	}
+	if e.metrics != nil {
+		oldest := now
+		for _, msg := range messages {
+			if !msg.CreatedAt.IsZero() && msg.CreatedAt.Before(oldest) {
+				oldest = msg.CreatedAt
+			}
+		}
+		if len(messages) == 0 {
+			e.metrics.setOutboxPublishLagSec(0)
+		} else {
+			e.metrics.setOutboxPublishLagSec(int64(now.Sub(oldest).Seconds()))
+		}
 	}
 
-	for _, msg := range messages {
-		claimed, err := e.repo.ClaimOutboxMessage(ctx, msg.ID, time.Now())
-		if err != nil {
-			result.Failed++
-			fmt.Printf("failed to claim outbox message %s: %v\n", msg.ID, err)
-			continue
+	claimedMessages := make([]*model.OutboxMessage, 0, len(messages))
+	claimedContexts := make([]context.Context, 0, len(messages))
+	batch := make([]messaging.EnvelopeMessage, 0, len(messages))
+	for i := range messages {
+		claimed := &messages[i]
+		msgTenant := claimed.TenantID
+		if msgTenant == "" {
+			msgTenant = auth.DefaultTenantID
 		}
-		if !claimed {
-			continue
-		}
+		msgCtx := auth.WithPrincipal(ctx, auth.Principal{
+			Subject: "workflow-runtime", TenantID: msgTenant,
+		})
+		metrics.RecordRuntimeClaim("outbox", "acquired")
 		result.Claimed++
-		attempt := msg.Attempts + 1
 
-		event, err := unmarshalOutboxEvent(msg.EventType, msg.Payload)
+		event, err := unmarshalOutboxEvent(claimed.EventType, claimed.Payload)
 		if err != nil {
 			result.Failed++
-			fmt.Printf("failed to decode outbox message %s (%s): %v\n", msg.ID, msg.EventType, err)
-			e.recordOutboxPublishFailure(ctx, msg.ID, attempt, err)
+			fmt.Printf("failed to decode outbox message %s (%s): %v\n", claimed.ID, claimed.EventType, err)
+			e.recordOutboxPublishFailure(msgCtx, claimed, err)
 			continue
 		}
 
-		if err := e.eventPublisher.Publish(ctx, event, msg.EventType); err != nil {
+		traceContext := map[string]string{}
+		_ = json.Unmarshal(claimed.TraceContext, &traceContext)
+		claimedMessages = append(claimedMessages, claimed)
+		claimedContexts = append(claimedContexts, msgCtx)
+		batch = append(batch, messaging.EnvelopeMessage{Event: event, Envelope: messaging.EventEnvelope{
+			EventID: claimed.ID, TenantID: claimed.TenantID, EventType: claimed.EventType,
+			AggregateType: claimed.AggregateType, AggregateID: claimed.AggregateID,
+			SchemaVersion: claimed.SchemaVersion, OccurredAt: claimed.OccurredAt, TraceContext: traceContext,
+		}})
+	}
+
+	publishErrs := e.publishEnvelopes(ctx, claimedContexts, batch)
+	published := make([]model.OutboxMessage, 0, len(batch))
+	for i, claimed := range claimedMessages {
+		if err := publishErrs[i]; err != nil {
 			result.Failed++
-			fmt.Printf("failed to publish pending outbox message %s (%s): %v\n", msg.ID, msg.EventType, err)
-			e.recordOutboxPublishFailure(ctx, msg.ID, attempt, err)
+			fmt.Printf("failed to publish pending outbox message %s (%s): %v\n", claimed.ID, claimed.EventType, err)
+			e.recordOutboxPublishFailure(claimedContexts[i], claimed, err)
 			continue
 		}
+		published = append(published, *claimed)
+	}
 
-		publishedAt := time.Now()
-		if err := e.repo.MarkOutboxMessagePublished(ctx, msg.ID, publishedAt); err != nil {
-			result.Failed++
-			fmt.Printf("failed to mark pending outbox message %s as published: %v\n", msg.ID, err)
-			e.recordOutboxPublishFailure(ctx, msg.ID, attempt, err)
-			continue
+	publishedAt := time.Now()
+	if err := e.repo.MarkOutboxMessagesPublished(ctx, claimOwner, published); err != nil {
+		if errors.Is(err, repository.ErrLeaseLost) {
+			metrics.RecordRuntimeClaim("outbox", "stale")
 		}
-
+		result.Failed += int64(len(published))
+		return result, fmt.Errorf("mark %d pending outbox messages as published: %w", len(published), err)
+	}
+	for _, message := range published {
 		result.Published++
-		e.recordOutboxPublishSuccess(msg.CreatedAt, publishedAt)
+		e.recordOutboxPublishSuccess(message.CreatedAt, publishedAt)
 	}
 
 	return result, nil
+}
+
+func (e *Engine) cachedPendingOutboxMessages(ctx context.Context, now time.Time) (int64, error) {
+	c := e.outboxPending
+	c.mu.Lock()
+	cached := c.value
+	if c.counting || (!c.at.IsZero() && now.Sub(c.at) < outboxPendingRefreshInterval) {
+		c.mu.Unlock()
+		return cached, nil
+	}
+	// Record the attempt before releasing the lock so concurrent relay cycles do
+	// not all issue the same exact count, including when a refresh fails.
+	c.at = now
+	c.counting = true
+	c.mu.Unlock()
+
+	pending, err := e.repo.CountPendingOutboxMessages(ctx, now)
+
+	c.mu.Lock()
+	c.counting = false
+	if err == nil {
+		c.value = pending
+		cached = pending
+	} else {
+		cached = c.value
+	}
+	c.mu.Unlock()
+	return cached, err
+}
+
+func (e *Engine) publishEnvelopes(ctx context.Context, msgContexts []context.Context, batch []messaging.EnvelopeMessage) []error {
+	if publisher, ok := e.eventPublisher.(messaging.BatchEnvelopePublisher); ok && len(batch) > 0 {
+		return publisher.PublishEnvelopes(ctx, batch)
+	}
+	errs := make([]error, len(batch))
+	for i, m := range batch {
+		errs[i] = e.publishEnvelope(msgContexts[i], m.Event, m.Envelope)
+	}
+	return errs
+}
+
+func (e *Engine) publishEnvelope(ctx context.Context, event proto.Message, envelope messaging.EventEnvelope) error {
+	if publisher, ok := e.eventPublisher.(messaging.EnvelopePublisher); ok {
+		return publisher.PublishEnvelope(ctx, event, envelope)
+	}
+	return e.eventPublisher.Publish(ctx, event, envelope.EventType)
 }
 
 func (e *Engine) recordOutboxPublishSuccess(createdAt, publishedAt time.Time) {
@@ -621,11 +769,11 @@ func (e *Engine) recordOutboxPublishSuccess(createdAt, publishedAt time.Time) {
 	}
 }
 
-func (e *Engine) recordOutboxPublishFailure(ctx context.Context, outboxID string, attempt int, publishErr error) {
+func (e *Engine) recordOutboxPublishFailure(ctx context.Context, claimed *model.OutboxMessage, publishErr error) {
 	if e.metrics != nil {
 		e.metrics.incOutboxPublishFailure()
 	}
-	if outboxID == "" {
+	if claimed == nil || claimed.ID == "" {
 		return
 	}
 
@@ -636,16 +784,32 @@ func (e *Engine) recordOutboxPublishFailure(ctx context.Context, outboxID string
 	if len(message) > outboxMaxErrorLength {
 		message = message[:outboxMaxErrorLength]
 	}
-	if attempt >= e.OutboxMaxAttempts() {
-		if err := e.repo.MarkOutboxMessageTerminalFailed(ctx, outboxID, message, time.Now()); err != nil {
-			fmt.Printf("failed to mark outbox message %s as terminal-failed: %v\n", outboxID, err)
+	if claimed.Attempts >= e.OutboxMaxAttempts() {
+		if e.metrics != nil {
+			e.metrics.incOutboxDeadLetter()
+		}
+		if err := e.repo.MarkOutboxMessageTerminalFailed(
+			ctx, claimed.ID, claimed.ClaimOwner, claimed.ClaimGeneration, message,
+		); err != nil {
+			if errors.Is(err, repository.ErrLeaseLost) {
+				metrics.RecordRuntimeClaim("outbox", "stale")
+			}
+			fmt.Printf("failed to mark outbox message %s as terminal-failed: %v\n", claimed.ID, err)
 		}
 		return
 	}
 
-	nextAttempt := time.Now().Add(outboxRetryDelay(attempt))
-	if err := e.repo.MarkOutboxMessagePublishFailed(ctx, outboxID, message, nextAttempt); err != nil {
-		fmt.Printf("failed to mark outbox message %s as publish-failed: %v\n", outboxID, err)
+	if e.metrics != nil {
+		e.metrics.incOutboxRetry()
+	}
+	if err := e.repo.MarkOutboxMessagePublishFailed(
+		ctx, claimed.ID, claimed.ClaimOwner, claimed.ClaimGeneration, message,
+		outboxRetryDelay(claimed.Attempts),
+	); err != nil {
+		if errors.Is(err, repository.ErrLeaseLost) {
+			metrics.RecordRuntimeClaim("outbox", "stale")
+		}
+		fmt.Printf("failed to mark outbox message %s as publish-failed: %v\n", claimed.ID, err)
 	}
 }
 
@@ -844,17 +1008,8 @@ func (e *Engine) ListCompletedInstances(ctx context.Context, limit int) ([]*mode
 	return instances, nil
 }
 
-func (e *Engine) ListCompletedInstancesWithCompletedUserTaskWorkers(ctx context.Context, workers []string, limit int) ([]*model.WorkflowInstance, error) {
-	pis, err := e.repo.ListCompletedProcessInstancesWithCompletedJobsByWorkers(ctx, UserTaskJobType, workers, limit)
-	if err != nil {
-		return nil, err
-	}
-
-	instances := make([]*model.WorkflowInstance, 0, len(pis))
-	for _, pi := range pis {
-		instances = append(instances, e.mapToWorkflowInstance(pi, nil, nil))
-	}
-	return instances, nil
+func (e *Engine) SearchUserTasks(ctx context.Context, filter repository.UserTaskFilter) ([]model.Job, error) {
+	return e.repo.SearchUserTaskJobs(ctx, UserTaskJobType, filter)
 }
 
 func (e *Engine) ListWorkflows(ctx context.Context) ([]*model.WorkflowDefinition, error) {
@@ -921,6 +1076,9 @@ func (e *Engine) UpdateInstanceVariables(ctx context.Context, instanceID string,
 		key, err := strconv.ParseInt(instanceID, 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid instance id: %v", err)
+		}
+		if _, err := txEngine.repo.GetProcessInstance(ctx, key); err != nil {
+			return err
 		}
 
 		return txEngine.persistVariables(ctx, instanceID, key, variables)
@@ -1030,7 +1188,7 @@ func (e *Engine) registerStepExecutors() {
 func generateDeterministicKey(s string) int64 {
 	h := fnv.New64a()
 	h.Write([]byte(s))
-	// Ensure positive key
+	// #nosec G115 -- masked to 63 bits, so the value always fits in int64.
 	return int64(h.Sum64() & 0x7FFFFFFFFFFFFFFF)
 }
 

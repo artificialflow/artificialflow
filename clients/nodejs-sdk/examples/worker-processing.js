@@ -21,8 +21,27 @@ const config = resolveArtificialFlowEnvironment();
 const jobType = process.env.ARTIFICIALFLOW_WORKER_JOB_TYPE || config.workerJobType;
 const mode = (process.env.ARTIFICIALFLOW_WORKER_MODE || 'complete').toLowerCase();
 
-if (!config.token && !config.zitadelProfileFile) {
-  throw new Error('Set ARTIFICIALFLOW_TOKEN or ARTIFICIALFLOW_ZITADEL_PROFILE_FILE');
+function oauthAuthFromEnvironment() {
+  const tokenUrl = process.env.OIDC_TOKEN_URL || process.env.ARTIFICIALFLOW_OIDC_TOKEN_URL;
+  const clientId = process.env.OIDC_CLIENT_ID || process.env.ARTIFICIALFLOW_CLIENT_ID;
+  const clientSecret = process.env.OIDC_CLIENT_SECRET || process.env.ARTIFICIALFLOW_CLIENT_SECRET;
+  if (tokenUrl && clientId && clientSecret) {
+    return {
+      type: 'oauth-client-credentials',
+      profile: {
+        type: 'oauth-client-credentials',
+        tokenUrl,
+        clientId,
+        clientSecret,
+      },
+    };
+  }
+  return undefined;
+}
+
+const auth = oauthAuthFromEnvironment();
+if (!config.token && !auth) {
+  throw new Error('Set ARTIFICIALFLOW_TOKEN or OIDC_TOKEN_URL/OIDC_CLIENT_ID/OIDC_CLIENT_SECRET');
 }
 if (!jobType || String(jobType).startsWith('<')) {
   throw new Error('Set ARTIFICIALFLOW_WORKER_JOB_TYPE');
@@ -31,9 +50,7 @@ if (!jobType || String(jobType).startsWith('<')) {
 async function main() {
   const client = new ArtificialFlowClient({
     baseUrl: config.baseUrl,
-    ...(config.zitadelProfileFile
-      ? { auth: { type: 'zitadel-jwt-profile', profile: require(config.zitadelProfileFile) } }
-      : { token: config.token }),
+    ...(auth ? { auth } : { token: config.token }),
   });
 
   const worker = client.createWorker(jobType, async (job) => {

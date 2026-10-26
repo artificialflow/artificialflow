@@ -216,15 +216,6 @@ export const uatCases: UatCase[] = [
     functions: ["jobs capabilities", "worker protocol version", "idempotency guardrail"],
   },
   {
-    id: "UAT-IAM-002",
-    title: "Bundled ZITADEL identity management admin APIs",
-    category: "identity-management",
-    expected: "pass",
-    elements: [],
-    functions: ["identity users", "identity roles", "private-key JWT Profile", "overlapping key rotation", "cleanup"],
-    bundledOnly: true,
-  },
-  {
     id: "UAT-BPMN-GAP-001",
     title: "Tracked gap: XML multi-instance execution",
     category: "gap",

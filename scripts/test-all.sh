@@ -96,7 +96,7 @@ STEP_START="$(date +%s)"
 log "Running unit tests..."
 
 set +e
-go test ./backend/... \
+go test ./backend/... ./connectors/... \
   -coverprofile="${REPORTS}/coverage.out" \
   -covermode=atomic \
   -json 2>&1 | tee "${REPORTS}/unit-raw.json"
@@ -143,6 +143,22 @@ if [[ $UNIT_EXIT -eq 0 ]]; then
 else
   fail "Unit tests FAILED"
   append_row "$(layer_result "${LAYER}" "❌ FAIL" "see reports/unit-raw.json" "${UNIT_DURATION}")"
+fi
+
+LAYER="Quality ratchets"
+STEP_START="$(date +%s)"
+set +e
+python3 "${ROOT}/scripts/quality/maintainability.py" &&
+  python3 "${ROOT}/scripts/quality/coverage_gate.py" "${REPORTS}/coverage.out"
+QUALITY_EXIT=$?
+set -e
+QUALITY_DURATION=$(( $(date +%s) - STEP_START ))
+if [[ $QUALITY_EXIT -eq 0 ]]; then
+  pass "Maintainability and coverage ratchets passed"
+  append_row "$(layer_result "${LAYER}" "✅ PASS" "hotspot, debt, duplication, coverage" "${QUALITY_DURATION}")"
+else
+  fail "Maintainability or coverage ratchet FAILED"
+  append_row "$(layer_result "${LAYER}" "❌ FAIL" "see quality gate output" "${QUALITY_DURATION}")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -330,6 +346,7 @@ bash "${ROOT}/scripts/test-report.sh"
 TOTAL_DURATION=$(( $(date +%s) - START_TIME ))
 
 record_required_failure "${UNIT_EXIT}" "Unit (Go)"
+record_required_failure "${QUALITY_EXIT}" "Quality ratchets"
 record_required_failure "${INT_EXIT}" "Integration (Go)"
 record_required_failure "${E2E_EXIT}" "E2E Backend"
 record_required_failure "${FE_UNIT_EXIT}" "Frontend (Vitest)"

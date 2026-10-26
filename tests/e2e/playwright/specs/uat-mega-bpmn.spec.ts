@@ -1,13 +1,13 @@
 // Mega BPMN UAT: Supported matrix elements via API + light UI checks.
 // Covers GitHub issue 40 quickstart path pieces (deploy/start) when AUTH is available.
-// Env: ARTIFICIALFLOW_BASE_URL, ARTIFICIALFLOW_TOKEN, ARTIFICIALFLOW_ACTING_USER, UAT_MEGA_SCALE
+// Env: ARTIFICIALFLOW_BASE_URL, ARTIFICIALFLOW_TOKEN, ARTIFICIALFLOW_END_USER, UAT_MEGA_SCALE
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "fs";
 import { join } from "path";
 
 const base = (process.env.ARTIFICIALFLOW_BASE_URL || "http://localhost:9100/api").replace(/\/$/, "");
 const token = process.env.ARTIFICIALFLOW_TOKEN || "";
-const actingUser = process.env.ARTIFICIALFLOW_ACTING_USER || "approver";
+const endUser = process.env.ARTIFICIALFLOW_END_USER || "approver";
 const scale = Math.max(1, Number(process.env.UAT_MEGA_SCALE || 3));
 
 const megaBpmn = readFileSync(join(__dirname, "../../fixtures/mega-process.bpmn"), "utf8");
@@ -15,8 +15,6 @@ const megaBpmn = readFileSync(join(__dirname, "../../fixtures/mega-process.bpmn"
 async function api(method: string, path: string, body?: unknown, raw = false) {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
-    "X-ArtificialFlow-Acting-Username": actingUser,
-    "X-ArtificialFlow-Acting-Subject": actingUser,
   };
   if (!raw) headers["Content-Type"] = "application/json";
   else headers["Content-Type"] = "application/xml";
@@ -38,7 +36,7 @@ async function api(method: string, path: string, body?: unknown, raw = false) {
 test.describe("uat-mega-bpmn", () => {
   test.skip(!token, "ARTIFICIALFLOW_TOKEN required");
 
-  test("deploy mega process, run worker+inbox path, scale instances", async ({ page }) => {
+  test("deploy mega process, run worker+user task path, scale instances", async ({ page }) => {
     const deploy = await api("POST", "/workflows", megaBpmn, true);
     expect(deploy.res.status, deploy.text).toBeLessThan(300);
     const workflowId = deploy.json.id || deploy.json.workflow_id;
@@ -73,22 +71,18 @@ test.describe("uat-mega-bpmn", () => {
       if (jobs.length === 0 && attempt > 5) break;
     }
 
-    // Inbox claim/complete for first instance
+    // Pending user task lookup, claim and complete for the first instance
     let matched = false;
     for (let i = 0; i < 30; i++) {
-      const inbox = await api("GET", "/inbox");
-      const items = Array.isArray(inbox.json) ? inbox.json : inbox.json?.instances || [];
-      const hit = items.find((item: any) => String(item.id) === instanceIds[0]);
-      if (hit) {
-        const tasks = await api("GET", `/inbox/instances/${hit.id}/tasks`);
-        const list = tasks.json?.tasks || tasks.json || [];
-        const task = list[0];
-        expect(task).toBeTruthy();
-        const executionId = task.executionId || task.execution_id || task.id;
+      const found = await api("GET", `/tasks?processInstanceKey=${instanceIds[0]}`);
+      const task = found.json?.tasks?.[0];
+      if (task) {
+        const taskPath = `/instances/${task.processInstanceKey}/tasks/${task.executionId}`;
         if (task.canClaim) {
-          await api("POST", `/inbox/instances/${hit.id}/tasks/${executionId}/claim`, {});
+          await api("POST", `${taskPath}/claim`, { assignee: endUser });
         }
-        await api("POST", `/inbox/instances/${hit.id}/tasks/${executionId}/complete`, {});
+        const completed = await api("POST", `${taskPath}/complete`, { assignee: endUser });
+        expect(completed.res.status, completed.text).toBe(200);
         matched = true;
         break;
       }

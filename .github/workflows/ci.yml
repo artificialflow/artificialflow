@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ACTIONLINT_VERSION: "v1.7.7"
+
 jobs:
   workflow-validation:
     name: Workflow and Agentic Script Validation
@@ -21,10 +24,10 @@ jobs:
       - name: Setup Go for actionlint
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.26.9"
 
       - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
 
       - name: Validate GitHub workflows
         run: actionlint -color=false
@@ -35,6 +38,18 @@ jobs:
           node scripts/validate_transition_compatibility.mjs
           node scripts/validate_release_version.mjs
           node scripts/validate_release_workflows.mjs
+          python3 scripts/release/evidence.py validate-manifest
+          python3 scripts/release/test_evidence.py
+          bash -n scripts/release/*.sh scripts/quality/*.sh scripts/test-security.sh
+          python3 scripts/quality/maintainability.py
+
+      - name: Prove missing release evidence blocks
+        run: |
+          set -euo pipefail
+          if python3 scripts/release/evidence.py report --phase pre-publish --sha "${GITHUB_SHA}"; then
+            echo "missing required evidence produced a false green" >&2
+            exit 1
+          fi
 
       - name: Validate agentic helper scripts
         run: |
@@ -56,7 +71,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.26.9"
 
       - name: Run service tests
         run: go test ./backend/... -count=1
@@ -71,6 +86,45 @@ jobs:
           go test ./backend/services/workflow-command/internal/interfaces/http -run 'Idempotency|Protocol|Capabilities|Metrics' -count=1
           go test ./backend/services/sync-worker/... -count=1
           go test ./backend/libs/worker -count=1
+
+  quality-fast:
+    name: Coverage, Race, and Fuzz Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.9"
+          cache: true
+
+      - name: Enforce maintainability ratchets
+        run: python3 scripts/quality/maintainability.py
+
+      - name: Enforce calibrated coverage floors
+        run: bash scripts/quality/coverage_gate.sh
+
+      - name: Run concurrency-sensitive race targets
+        run: bash scripts/quality/race.sh
+
+      - name: Run bounded fuzz smoke
+        env:
+          FUZZ_TIME: 3s
+        run: bash scripts/quality/fuzz.sh
+
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-fast-reports
+          path: |
+            reports/quality-coverage.json
+            reports/quality-coverage.out
+          if-no-files-found: warn
+          retention-days: 14
 
   frontend:
     name: Frontend Build and Tests
@@ -139,6 +193,50 @@ jobs:
         working-directory: .
         run: bash scripts/validate_generated_proto.sh
 
+  dotnet-sdk:
+    name: .NET SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/dotnet-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.x"
+
+      - name: Build
+        run: dotnet build ArtificialFlow.Sdk.sln
+
+      - name: Test
+        run: dotnet test ArtificialFlow.Sdk.sln --no-build
+
+      - name: Pack
+        run: dotnet pack src/ArtificialFlow.Sdk/ArtificialFlow.Sdk.csproj --no-build -o artifacts
+
+  java-sdk:
+    name: Java SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/java-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Verify
+        run: mvn -B verify
+
   migration-release-gates:
     name: ArtificialFlow Migration Release Gates
     runs-on: ubuntu-latest
@@ -150,7 +248,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.26.9"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -165,7 +263,7 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
 
       - name: Install package dependencies
         run: |
@@ -196,7 +294,7 @@ jobs:
             context: .
           - name: frontend
             dockerfile: frontend/Dockerfile
-            context: frontend
+            context: .
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -222,11 +320,11 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v4
 
-      - name: Validate core/full compose profiles
-        run: make smoke-profiles
+      - name: Validate compose stack
+        run: make smoke
 
-      - name: Validate release compose profiles
-        run: make smoke-release-profiles
+      - name: Validate release compose config
+        run: make smoke-release
 
       - name: Validate operational scripts
         run: |

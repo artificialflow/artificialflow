@@ -36,10 +36,10 @@ body:
     attributes:
       label: Deployment mode
       options:
-        - Docker Compose external IAM
-        - Docker Compose bundled ZITADEL
-        - Helm external IAM
-        - Helm bundled ZITADEL
+        - Docker Compose (IAM_DEPLOYMENT_MODE=true, external OIDC)
+        - Docker Compose (IAM_DEPLOYMENT_MODE=false, no IAM)
+        - Helm (iam.mode=true, external OIDC)
+        - Helm (iam.mode=false, no IAM)
         - Local development
     validations:
       required: true

@@ -9,7 +9,7 @@ on:
       tag:
         description: Release tag to validate or publish
         required: true
-        default: v1.1.0
+        default: v1.2.0
       publish:
         description: Publish Docker images and npm packages
         required: true
@@ -25,20 +25,165 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  images:
-    name: Build, scan, verify, and sign release images
+  candidate-images:
+    name: Build and scan immutable candidates
     uses: ./.github/workflows/release-images.yml
     with:
       tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
       publish: ${{ github.event_name == 'push' || inputs.publish }}
+      promote: false
     secrets: inherit
 
-  npm:
-    name: Validate and publish npm packages
-    needs: images
+  validate-npm:
+    name: Validate npm package candidate
+    if: ${{ github.event_name != 'push' && !inputs.publish }}
+    needs: candidate-images
     uses: ./.github/workflows/release-npm.yml
     with:
       tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
-      publish: ${{ github.event_name == 'push' || inputs.publish }}
+      publish: false
+      images_verified: false
+    secrets: inherit
+
+  validate-nuget:
+    name: Validate NuGet package candidate
+    if: ${{ github.event_name != 'push' && !inputs.publish }}
+    needs: candidate-images
+    uses: ./.github/workflows/release-nuget.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      publish: false
+      images_verified: false
+    secrets: inherit
+
+  validate-maven:
+    name: Validate Maven package candidate
+    if: ${{ github.event_name != 'push' && !inputs.publish }}
+    needs: candidate-images
+    uses: ./.github/workflows/release-maven.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      publish: false
+      images_verified: false
+    secrets: inherit
+
+  production-evidence:
+    name: Prove production candidate
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: candidate-images
+    uses: ./.github/workflows/release-evidence.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      candidate_artifact: candidate-images-false
+    secrets: inherit
+
+  promotion-approval:
+    name: Approve production promotion
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: production-evidence
+    runs-on: ubuntu-latest
+    environment:
+      name: release-production
+    steps:
+      - name: Bind approval to candidate workflow
+        run: echo "Promotion approved for ${{ github.event_name == 'push' && github.ref_name || inputs.tag }} at ${{ github.sha }}"
+
+  promote-images:
+    name: Promote tested image bytes
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: promotion-approval
+    uses: ./.github/workflows/release-images.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      publish: true
+      promote: true
+    secrets: inherit
+
+  publish-npm:
+    name: Publish tested npm package bytes
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: promote-images
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      publish: true
       images_verified: true
     secrets: inherit
+
+  publish-nuget:
+    name: Publish tested NuGet package bytes
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: promote-images
+    uses: ./.github/workflows/release-nuget.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      publish: true
+      images_verified: true
+    secrets: inherit
+
+  publish-maven:
+    name: Publish tested Maven package bytes
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: promote-images
+    uses: ./.github/workflows/release-maven.yml
+    with:
+      tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      publish: true
+      images_verified: true
+    secrets: inherit
+
+  post-publish-smoke:
+    name: Verify published bytes and smoke
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: [promote-images, publish-npm, publish-nuget, publish-maven]
+    runs-on: [self-hosted, linux, release-evidence]
+    timeout-minutes: 90
+    environment:
+      name: release-production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download tested image lock
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-images-false
+          path: reports
+
+      - name: Download tested package lock
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-packages
+          path: reports/package-candidate
+
+      - name: Download pre-publish evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-evidence-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          path: reports
+
+      - name: Require release locks and execute post-publish gate
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
+          CANDIDATE_PACKAGE_LOCK: reports/candidate-packages.json
+          POST_PUBLISH_SMOKE_COMMAND: bash scripts/release/kind_helm_smoke.sh
+          KIND_VALUES_FILE: ${{ vars.KIND_VALUES_FILE }}
+        run: |
+          set -euo pipefail
+          cp reports/package-candidate/candidate-packages.json reports/candidate-packages.json
+          test -f reports/candidate-images.json
+          test -f reports/candidate-packages.json
+          bash scripts/release/post_publish_smoke.sh
+          python3 scripts/release/evidence.py report --phase all
+
+      - name: Upload final release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: final-release-evidence-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          path: |
+            reports/evidence
+            reports/release-evidence.md
+            reports/post-publish-smoke.txt
+          if-no-files-found: error
+          retention-days: 730

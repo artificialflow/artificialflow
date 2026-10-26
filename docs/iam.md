@@ -1,12 +1,46 @@
 # IAM Guide
 
-ArtificialFlow supports external OIDC and bundled ZITADEL. Authentication proves the
-identity and validates the token; authorization uses exact ArtificialFlow role names
-from the configured roles claim.
+ArtificialFlow integrates with an external OIDC provider. It does not ship an IAM
+product. Authentication proves the identity and validates the token;
+authorization uses exact ArtificialFlow role names from the configured roles claim.
+Any standards-compliant OIDC provider works (Keycloak, Entra ID, Auth0, Okta,
+...). Recipes live in [docs/iam/](iam/). Providers that put roles in a different
+claim are handled by `AUTH_CLAIM_ROLES_PATH` (a comma-separated list of dotted
+claim paths).
+
+## Modes
+
+`IAM_DEPLOYMENT_MODE` (Helm: `iam.mode`) is a boolean, `true` or `false`. Any
+other value, including the old `external` / `disabled`, fails startup.
+
+| `IAM_DEPLOYMENT_MODE` | Console login | API and SDKs |
+| :--- | :--- | :--- |
+| `true` (Helm default) | Your OIDC provider | Bearer token from your OIDC provider; roles from the token |
+| `false` (Compose default) | Local sign-in, `admin` / `admin` (`CONSOLE_ADMIN_USERNAME` / `CONSOLE_ADMIN_PASSWORD`) | No token needed; every call runs as admin |
+
+`true` requires the issuer URLs, `AUTH_CLIENT_ID`, and `AUTH_CLAIM_ROLES_PATH`.
+`false` has no OIDC issuer and is for local evaluation only: the console login
+is a convenience gate and does not protect the API. `CONSOLE_ADMIN_*` are
+passed only in that mode. `AUTH_PRODUCTION=true` refuses to start in that mode.
+
+The rest of this guide covers `IAM_DEPLOYMENT_MODE=true`.
+
+## What IAM is used for
+
+ArtificialFlow uses your OIDC provider for two things only:
+
+- Signing in the people who administer ArtificialFlow (console users).
+- Issuing tokens to the SDK/API clients that call ArtificialFlow.
+
+Authorization is role-based. There are no ArtificialFlow-specific scopes. End
+users of your own applications never authenticate to ArtificialFlow: your
+application validates their tokens with its own IAM, then asks ArtificialFlow
+for their tasks with `GET /tasks` and passes the end user as a filter or
+`assignee` value (see [API.md](API.md#user-tasks-api)).
 
 ## External IAM
 
-Use external mode when your organization already operates an OIDC provider.
+Use `IAM_DEPLOYMENT_MODE=true` when your organization already operates an OIDC provider.
 ArtificialFlow validates its tokens but does not create or manage identities in that
 provider.
 
@@ -26,7 +60,7 @@ The external IAM administrator must create:
    use `workflow-frontend`.
 3. A confidential machine-to-machine client for each SDK, worker, or automation
    integration.
-4. The three standard ArtificialFlow roles listed below.
+4. The four standard ArtificialFlow roles listed below.
 5. Token mappings that put assigned roles into one of the configured
    `AUTH_CLAIM_ROLES_PATH` claims.
 
@@ -43,28 +77,30 @@ The frontend uses the browser origin for all three redirect URIs.
 ### External IAM role provisioning
 
 Role names are matched case-insensitively after trimming, but providers and
-automation should use these exact lowercase names:
+automation should use these exact names. Other spellings, including the
+pre-1.x names with spaces, are not recognized.
 
-- `artificialflow admin`: human platform administrators. This role can administer
-  workflows and instances and access privileged platform operations.
-- `artificialflow modeler`: human process designers. This role can access the process
-  catalog and modeler but is not a platform administrator.
-- `artificialflow client`: non-human SDK, worker, API, and automation identities. It can
-  start instances, publish messages/signals, and operate jobs. It must not be
-  used as a general human login role. Full HTTP route map:
-  [API.md](API.md).
+- `artificialflowadmin`: full access. Platform administrators: every console
+  page and every API, including deleting workflows and instances, editing
+  variables, incidents, job retry, migrations and engine metrics.
+- `artificialflowbusiness`: process designers. Console access to the process
+  catalog, decisions and modeler; API access to deploy and read workflows and
+  decisions. Instances, variables, deletes, incidents and client setup are
+  hidden.
+- `artificialflowclient`: SDK, worker, API and automation identities. Starts
+  instances, publishes messages/signals/escalations, operates jobs, searches,
+  claims and completes user tasks on behalf of end users. No console access.
+- `artificialflowanalytics`: reserved for analytics. It opens an Analytics
+  placeholder page and has no API access yet.
 
 Recommended assignments:
 
-- ArtificialFlow administrator: `artificialflow admin`
-- Process designer: `artificialflow modeler`
-- SDK/service account: `artificialflow client` only
-- Backend-for-frontend calling SDK inbox APIs: `artificialflow client` only; pass the
-  signed-in user's acting identity separately and keep the service token on the
-  server
+- ArtificialFlow administrator: `artificialflowadmin`
+- Process designer: `artificialflowbusiness`
+- SDK/service account, including the backend of an end-user task application:
+  `artificialflowclient` only
 
-Do not grant `artificialflow admin` to an SDK client. Some inbox operations explicitly
-reject integration identities that also have the admin role.
+Do not grant `artificialflowadmin` to an SDK client.
 
 The default role paths are:
 
@@ -80,7 +116,6 @@ Other claim mappings are available for provider-specific tokens:
 
 ```text
 AUTH_CLAIM_SUBJECT_PATH
-AUTH_CLAIM_SCOPES_PATH
 AUTH_CLAIM_TENANT_PATH
 AUTH_CLAIM_EMAIL_PATH
 AUTH_CLAIM_NAME_PATH
@@ -122,82 +157,38 @@ requires separate internal and public addresses,
 `AUTH_ALLOW_INSECURE_ISSUER=true` enables issuer-aware request rewriting; use
 it only with a trusted internal route and an explicit security review.
 
-## Bundled ZITADEL
+Production should also set:
 
-Use bundled mode (internal IAM) when ArtificialFlow should deploy and bootstrap
-ZITADEL.
+```text
+AUTH_PRODUCTION=true
+AUTH_ALLOWED_ALGORITHMS=RS256
+AUTH_HTTP_TIMEOUT_SECONDS=10
+TENANT_MODE=strict
+```
 
-Local Compose quickstart:
-
-- Compose: [`docker-compose.zitadel.yml`](../docker-compose.zitadel.yml)
-  (+ optional [`docker-compose.release.yml`](../docker-compose.release.yml) for
-  published images)
-- Commands: `make up-zitadel` or `make up-zitadel-release`
-- Walkthrough: [README Quickstart](../README.md#quickstart-bundled--internal-iam)
-  and [Getting started](getting-started.md#option-1-bundled-zitadel-internal-iam)
-
-The bootstrap process creates:
-
-- The ArtificialFlow project and project audience.
-- The public frontend OIDC application.
-- A dedicated ArtificialFlow API application used to authenticate token-introspection
-  requests.
-- `artificialflow admin`, `artificialflow modeler`, and `artificialflow client`.
-- The initial administrator with `artificialflow admin`.
-- System machine users required by bootstrap and login internals.
-
-Operators do not manually create the standard roles, frontend client, backend
-audience, or introspection client in bundled mode. Use ArtificialFlow's
-**Identity Management** page for human users and role assignments, and
-**SDK Clients** for non-human clients.
-
-Current bootstrap reconciliation keeps only the configured initial human
-administrator among users assigned `artificialflow admin`; restarting the bundled IAM
-bootstrap deletes additional human ArtificialFlow administrators. Do not rely on
-multiple durable bundled-IAM administrators until this behavior is changed.
-External IAM is not affected because ArtificialFlow does not reconcile provider users.
-
-Default local admin:
-
-- Username: `admin`
-- Password: `admin`
-- Email: `admin@admin.localhost`
-
-These values apply only to `docker-compose.zitadel.yml`. Kubernetes operators
-must replace the sample administrator password and identity values.
+Production mode fails startup when authentication is disabled, an issuer or
+introspection URL is not HTTPS, audience enforcement is disabled, insecure issuer
+rewriting is enabled, introspection credentials are absent, or the algorithm
+allowlist is empty. OIDC discovery and JWKS requests use bounded timeouts and
+refresh keys when the provider rotates signing keys.
 
 ## SDK Client Standard
 
 For SDK and automation usage, use a machine identity with only
-`artificialflow client`. Do not use a human username/password flow for long-running
+`artificialflowclient`. Do not use a human username/password flow for long-running
 integrations.
 
-In bundled mode, an administrator creates the machine user through
-**SDK Clients**. The browser generates an RSA key pair, uploads only the public
-key, and downloads a one-time service-account profile containing the private
-key. ArtificialFlow and ZITADEL never receive or persist that private key.
-
-The Node.js SDK signs a five-minute JWT Profile assertion and exchanges it at
-ZITADEL for a short-lived access token. Only the access token is sent to
-ArtificialFlow. Bundled ArtificialFlow validates browser JWTs, SDK access tokens, and temporary
-legacy PATs through authenticated introspection with project-audience
-enforcement.
-
-In external mode, create a provider-native client-credentials application,
-assign only `artificialflow client`, include the ArtificialFlow audience and role claim in its
+Create a provider-native client-credentials application, assign only
+`artificialflowclient`, include the ArtificialFlow audience and role claim in its
 access tokens, and rotate its secret in the external provider.
 
-Rotate bundled keys with overlap: add and distribute a replacement key, verify
-it, then revoke the old key. Revocation prevents new exchanges with that key;
-already-minted access tokens remain usable until their short expiry.
-Terminating or deleting the machine user invalidates active tokens through
-introspection.
+The Node.js, .NET, and Java SDKs can acquire, cache, and refresh that token.
+Only the access token is sent to ArtificialFlow.
 
-Existing PATs remain listed and revocable during migration. New PAT creation
-and rotation are disabled by default. Enable the emergency compatibility
-switches only for a time-bounded rollback.
-
-See [Node.js SDK](sdk-nodejs.md) for complete configuration examples.
+See [Node.js SDK](sdk-nodejs.md), [.NET SDK](sdk-dotnet.md), and
+[Java SDK](sdk-java.md) for complete configuration examples. The
+[Python](sdk-python.md) and [Go](sdk-go.md) worker clients take a ready access
+token and do not refresh it.
 
 ## Authentication verification
 
@@ -226,9 +217,10 @@ the ArtificialFlow backend audience, and the required role.
 - Keep audience validation enabled.
 - Grant only the minimum ArtificialFlow role required by each identity.
 - Keep human and machine identities separate.
-- Keep assertions at five minutes or less and access tokens short-lived.
-- Rotate client secrets and private keys regularly.
-- Store downloaded service-account profiles in a secret manager, never source
-  control or browser storage.
+- Keep access tokens short-lived.
+- Rotate client secrets regularly in the provider.
+- Store OIDC client secrets in a secret manager, never source control or
+  browser storage.
 - Never put SDK client secrets or tokens in frontend code.
-- Keep system machine users hidden from human identity management views.
+- Never run `IAM_DEPLOYMENT_MODE=false` where the API is reachable by untrusted
+  clients: the API accepts requests without a token in that mode.

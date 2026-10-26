@@ -17,8 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/artificialflow/artificialflow/backend/libs/model"
-	"github.com/artificialflow/artificialflow/backend/libs/worker"
 	"github.com/artificialflow/artificialflow/connectors/internal/common"
 )
 
@@ -28,23 +26,11 @@ func main() {
 	baseURL := common.EnvOr("ARTIFICIALFLOW_BASE_URL", "http://localhost:9100/api")
 	token := os.Getenv("ARTIFICIALFLOW_TOKEN")
 
-	client, err := worker.NewClient(worker.ClientConfig{BaseURL: baseURL, BearerToken: token})
-	if err != nil {
-		log.Fatal(err)
-	}
-	w, err := worker.NewWorker(client, worker.WorkerConfig{
-		JobType:         jobType,
-		WorkerName:      common.EnvOr("WORKER_NAME", "s3-connector"),
-		MaxJobs:         3,
-		ActivateTimeout: 5 * time.Second,
-		LockDuration:    120 * time.Second,
-		Handler: func(ctx context.Context, job model.Job) (map[string]any, error) {
-			vars, err := common.LoadInstanceVars(ctx, baseURL, token, job.ProcessInstanceKey)
-			if err != nil {
-				return nil, err
-			}
-			return putObject(ctx, vars)
-		},
+	runtime, err := common.NewRuntime(common.RuntimeConfig{
+		BaseURL: baseURL, Token: token, JobType: jobType,
+		WorkerName: common.EnvOr("WORKER_NAME", "s3-connector"),
+		MaxJobs:    3, LockDuration: 120 * time.Second,
+		Execute: putObject,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -52,7 +38,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("s3 connector listening for %s", jobType)
-	if err := w.Run(ctx); err != nil && err != context.Canceled {
+	if err := runtime.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
 }
@@ -129,9 +115,9 @@ func putObject(ctx context.Context, vars map[string]any) (map[string]any, error)
 		return nil, fmt.Errorf("s3 put failed: %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return map[string]any{
-		"s3Bucket":  bucket,
-		"s3Key":     key,
-		"s3Status":  resp.StatusCode,
+		"s3Bucket":   bucket,
+		"s3Key":      key,
+		"s3Status":   resp.StatusCode,
 		"s3Uploaded": true,
 	}, nil
 }

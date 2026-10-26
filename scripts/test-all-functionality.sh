@@ -221,10 +221,7 @@ warn_case() {
 }
 
 external_iam_live_configured() {
-  local config
-  config="$(cd "${ROOT}" && docker compose -f docker-compose.external-iam.yml config 2>/dev/null || true)"
-  [[ -n "${config}" ]] || return 1
-  [[ "${config}" != *"https://login.example.com"* ]]
+  [[ -n "${AUTH_ISSUER_PUBLIC_URL:-}" && "${AUTH_ISSUER_PUBLIC_URL}" != "https://login.example.com" ]]
 }
 
 wait_http() {
@@ -319,12 +316,14 @@ preflight() {
 }
 
 config_and_contracts() {
-  run_case "config-smoke-profiles" "Compose profile smoke checks" "deployment" "true" "make smoke-profiles"
-  run_case "config-smoke-release-profiles" "Release compose profile smoke checks" "deployment" "true" "make smoke-release-profiles"
+  run_case "config-smoke" "Compose smoke checks" "deployment" "true" "make smoke"
+  run_case "config-smoke-release" "Release compose smoke checks" "deployment" "true" "make smoke-release"
   run_case "helm-render-validation" "Helm render and lint validation" "deployment" "true" "make validate-helm"
   run_case "go-unit" "Go unit and contract tests" "backend" "true" "make test-unit"
   run_case "frontend-unit-build" "Frontend lint, tests, and build" "frontend" "true" "npm --prefix frontend ci && npm --prefix frontend run lint && npm --prefix frontend test && npm --prefix frontend run build"
   run_case "sdk-contract" "Node.js SDK contract and package validation" "sdk" "true" "npm --prefix clients/nodejs-sdk ci && npm --prefix clients/nodejs-sdk test && npm --prefix clients/nodejs-sdk run validate:package && (cd clients/nodejs-sdk && npm pack --dry-run)"
+  run_case "sdk-dotnet" ".NET SDK build and tests" "sdk" "true" "make sdk-dotnet"
+  run_case "sdk-java" "Java SDK build and tests" "sdk" "true" "make sdk-java"
 }
 
 run_ui_playwright() {
@@ -358,10 +357,11 @@ run_perf_k6() {
   PERF_ALREADY_RUN=true
 }
 
-deployment_base_full_cqrs() {
-  local files="-f docker-compose.yml" profile="full-cqrs" label="base-full-cqrs"
+deployment_source_disabled() {
+  local files="-f docker-compose.yml" profile="" label="source-disabled"
+  export IAM_DEPLOYMENT_MODE=false
   compose_down "${files}" "${profile}" "${label}"
-  run_case "deploy-${label}" "Start base full CQRS deployment" "deployment" "true" "docker compose ${files} --profile ${profile} up -d --build" "${label}"
+  run_case "deploy-${label}" "Start source deployment (IAM disabled)" "deployment" "true" "make up" "${label}"
   if [[ "${LAST_EXIT_CODE}" -ne 0 ]]; then
     collect_compose_diagnostics "${files}" "${profile}" "${label}"
     skip_case "health-${label}" "Base full CQRS health checks" "deployment" "true" "Deployment startup failed." "${label}"
@@ -387,6 +387,7 @@ deployment_base_full_cqrs() {
   run_ui_playwright
   run_perf_k6 "${label}"
   compose_down "${files}" "${profile}" "${label}"
+  unset IAM_DEPLOYMENT_MODE
 }
 
 deployment_compose_model() {
@@ -432,35 +433,25 @@ deployment_matrix() {
     skip_case "deployment-matrix" "Live Docker Compose deployment matrix" "deployment" "true" "Docker preflight failed; live deployment checks cannot run."
     return
   fi
-  deployment_base_full_cqrs
-  local external_iam_ready=false
+  deployment_source_disabled
   if [[ "${ALLOW_EXTERNAL_IAM_LIVE}" == "true" ]] && external_iam_live_configured; then
-    external_iam_ready=true
-    deployment_compose_model "external-iam" "-f docker-compose.external-iam.yml" "make up-external-iam" "make down-external-iam"
+    deployment_compose_model "source-external" "-f docker-compose.yml" "make up" "make down"
   elif [[ "${ALLOW_EXTERNAL_IAM_LIVE}" == "true" ]]; then
-    warn_case "external-iam-live" "External IAM live deployment" "deployment" "External IAM live checks require docker-compose.external-iam.yml to point at a reachable provider; current config still contains the example issuer https://login.example.com." "external-iam"
+    warn_case "external-iam-live" "External OIDC live deployment" "deployment" "External OIDC live checks require AUTH_ISSUER_PUBLIC_URL to point at a reachable provider." "source-external"
   else
-    warn_case "external-iam-live" "External IAM live deployment" "deployment" "External IAM live checks require a reachable provider and are disabled by default; pass --allow-external-iam-live after configuring docker-compose.external-iam.yml." "external-iam"
+    warn_case "external-iam-live" "External OIDC live deployment" "deployment" "External OIDC live checks require a reachable provider and are disabled by default; set IAM_DEPLOYMENT_MODE=true and AUTH_ISSUER_* then pass --allow-external-iam-live." "source-external"
   fi
-  deployment_compose_model "bundled-zitadel" "-f docker-compose.zitadel.yml" "make up-zitadel" "make down-zitadel"
 
-  if [[ -n "${ARTIFICIALFLOW_IMAGE_TAG:-${ARTIFICIALFLOW_IMAGE_TAG:-}}" ]]; then
-    if [[ "${external_iam_ready}" == "true" ]]; then
-      deployment_compose_model "external-iam-release" "-f docker-compose.external-iam.yml -f docker-compose.release.yml" "make up-external-iam-release" "make down-external-iam"
-    elif [[ "${ALLOW_EXTERNAL_IAM_LIVE}" == "true" ]]; then
-      warn_case "external-iam-release-live" "External IAM release deployment" "deployment" "External IAM release live checks require docker-compose.external-iam.yml to point at a reachable provider; current config still contains the example issuer." "external-iam-release"
-    else
-      warn_case "external-iam-release-live" "External IAM release deployment" "deployment" "External IAM release live checks require a reachable provider and are disabled by default." "external-iam-release"
-    fi
-    deployment_compose_model "bundled-zitadel-release" "-f docker-compose.zitadel.yml -f docker-compose.release.yml" "make up-zitadel-release" "make down-zitadel"
+  if [[ -n "${ARTIFICIALFLOW_IMAGE_TAG:-}" ]]; then
+    IAM_DEPLOYMENT_MODE=false deployment_compose_model "release-no-iam" "-f docker-compose.yml" "IAM_DEPLOYMENT_MODE=false make up-release" "make down"
   else
     warn_case "release-live-deployments" "Release image live deployments" "deployment" "ARTIFICIALFLOW_IMAGE_TAG is not set; release-image live checks not run."
   fi
 
   if [[ "${ALLOW_HELM_LIVE}" == "true" && "${SKIP_HELM_LIVE}" != "true" ]]; then
     if command -v helm >/dev/null 2>&1 && command -v kubectl >/dev/null 2>&1 && kubectl cluster-info >/dev/null 2>&1; then
-      run_case "helm-live-external-rendered" "Helm live external IAM dry-run server validation" "deployment" "false" "helm upgrade --install artificialflow ./charts/artificialflow -n artificialflow --create-namespace -f ./charts/artificialflow/values-external-iam.yaml --dry-run=server" "helm-external-iam"
-      run_case "helm-live-zitadel-rendered" "Helm live bundled ZITADEL dry-run server validation" "deployment" "false" "helm upgrade --install artificialflow ./charts/artificialflow -n artificialflow --create-namespace -f ./charts/artificialflow/values-internal-iam.yaml --dry-run=server" "helm-zitadel"
+      run_case "helm-live-default-rendered" "Helm live default dry-run server validation" "deployment" "false" "helm upgrade --install artificialflow ./charts/artificialflow -n artificialflow --create-namespace --dry-run=server" "helm-default"
+      run_case "helm-live-kind-rendered" "Helm live kind-smoke dry-run server validation" "deployment" "false" "helm upgrade --install artificialflow ./charts/artificialflow -n artificialflow --create-namespace -f ./charts/artificialflow/values-kind-smoke.yaml --dry-run=server" "helm-kind"
     else
       warn_case "helm-live" "Helm live deployment checks" "deployment" "helm, kubectl, or Kubernetes cluster is unavailable."
     fi

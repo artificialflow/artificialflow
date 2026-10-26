@@ -9,7 +9,7 @@ import (
 
 func TestStandardRoles(t *testing.T) {
 	roles := StandardRoles()
-	expected := []string{RoleArtificialFlowAdmin, RoleArtificialFlowModeler, RoleArtificialFlowClient}
+	expected := []string{"artificialflowadmin", "artificialflowbusiness", "artificialflowclient", "artificialflowanalytics"}
 	if len(roles) != len(expected) {
 		t.Fatalf("expected %d standard roles, got %d", len(expected), len(roles))
 	}
@@ -21,31 +21,33 @@ func TestStandardRoles(t *testing.T) {
 }
 
 func TestPrincipalHasRole(t *testing.T) {
-	principal := Principal{Roles: []string{" ArtificialFlow Admin "}}
-	if !principal.HasRole(RoleArtificialFlowAdmin) {
+	principal := Principal{Roles: []string{" ArtificialFlowAdmin "}}
+	if !principal.HasRole(RoleAdmin) {
 		t.Fatal("expected admin role to authorize as canonical admin")
 	}
-	if principal.HasRole(RoleArtificialFlowClient) {
+	if principal.HasRole(RoleClient) {
 		t.Fatal("did not expect client role match")
 	}
-	if principal.HasRole(RoleArtificialFlowModeler) {
-		t.Fatal("did not expect modeler role match")
+	if principal.HasRole(RoleBusiness) {
+		t.Fatal("did not expect business role match")
 	}
 }
 
 func TestCanonicalizeRolesNormalizesStandardRolesAndPreservesCustomRoles(t *testing.T) {
 	roles := CanonicalizeRoles([]string{
-		" ArtificialFlow Admin ",
-		"ARTIFICIALFLOW ADMIN",
-		"artificialflow modeler",
-		RoleArtificialFlowClient,
+		" ArtificialFlowAdmin ",
+		"ARTIFICIALFLOWADMIN",
+		"artificialflowbusiness",
+		RoleClient,
+		"ArtificialFlowAnalytics",
 		"Finance Reviewer",
 		" finance reviewer ",
 	})
 	expected := []string{
-		RoleArtificialFlowAdmin,
-		RoleArtificialFlowModeler,
-		RoleArtificialFlowClient,
+		RoleAdmin,
+		RoleBusiness,
+		RoleClient,
+		RoleAnalytics,
 		"Finance Reviewer",
 	}
 	if len(roles) != len(expected) {
@@ -62,10 +64,10 @@ func TestRequireAnyRole(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := RequireAnyRole(RoleArtificialFlowAdmin)(next)
+	handler := RequireAnyRole(RoleAdmin)(next)
 
 	allowedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	allowedReq = allowedReq.WithContext(WithPrincipal(allowedReq.Context(), Principal{Roles: []string{RoleArtificialFlowAdmin}}))
+	allowedReq = allowedReq.WithContext(WithPrincipal(allowedReq.Context(), Principal{Roles: []string{RoleAdmin}}))
 	allowedResp := httptest.NewRecorder()
 	handler.ServeHTTP(allowedResp, allowedReq)
 	if allowedResp.Code != http.StatusNoContent {
@@ -73,7 +75,7 @@ func TestRequireAnyRole(t *testing.T) {
 	}
 
 	deniedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	deniedReq = deniedReq.WithContext(WithPrincipal(deniedReq.Context(), Principal{Roles: []string{RoleArtificialFlowClient}}))
+	deniedReq = deniedReq.WithContext(WithPrincipal(deniedReq.Context(), Principal{Roles: []string{RoleClient}}))
 	deniedResp := httptest.NewRecorder()
 	handler.ServeHTTP(deniedResp, deniedReq)
 	if deniedResp.Code != http.StatusForbidden {
@@ -88,19 +90,13 @@ func TestRequireAnyRole(t *testing.T) {
 	}
 }
 
-func TestDisabledAuthPrincipalHasStandardRoles(t *testing.T) {
+func TestDisabledAuthPrincipalIsAdmin(t *testing.T) {
 	principal := disabledAuthPrincipal()
 	if principal.Subject != "local-disabled-auth" {
 		t.Fatalf("unexpected disabled-auth subject %q", principal.Subject)
 	}
-	if !principal.HasRole(RoleArtificialFlowAdmin) {
+	if !principal.HasRole(RoleAdmin) {
 		t.Fatal("expected disabled-auth principal to have admin role")
-	}
-	if !principal.HasRole(RoleArtificialFlowModeler) {
-		t.Fatal("expected disabled-auth principal to have modeler role")
-	}
-	if !principal.HasRole(RoleArtificialFlowClient) {
-		t.Fatal("expected disabled-auth principal to have SDK client role")
 	}
 }
 
@@ -115,13 +111,13 @@ func TestMiddlewareDisabledAuthAllowsRoleProtectedHTTPRoute(t *testing.T) {
 		if !ok {
 			t.Fatal("expected disabled-auth principal in request context")
 		}
-		if !principal.HasRole(RoleArtificialFlowAdmin) {
+		if !principal.HasRole(RoleAdmin) {
 			t.Fatal("expected disabled-auth principal to have admin role")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	handler := middleware.Handler(RequireAnyRole(RoleArtificialFlowAdmin)(next))
+	handler := middleware.Handler(RequireAnyRole(RoleAdmin)(next))
 	resp := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	handler.ServeHTTP(resp, req)

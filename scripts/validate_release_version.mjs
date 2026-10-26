@@ -77,6 +77,17 @@ const lock = readJSON("clients/nodejs-sdk/package-lock.json");
 equal("clients/nodejs-sdk/package-lock.json version", lock.version, version);
 equal("clients/nodejs-sdk/package-lock.json root package version", lock.packages?.[""]?.version, version);
 
+const frontendPackage = readJSON("frontend/package.json");
+const frontendLock = readJSON("frontend/package-lock.json");
+equal("frontend/package.json version", frontendPackage.version, version);
+equal("frontend/package-lock.json version", frontendLock.version, version);
+equal("frontend/package-lock.json root package version", frontendLock.packages?.[""]?.version, version);
+equal(
+  "docs/openapi.yaml info.version",
+  capture("docs/openapi.yaml", /^\s{2}version:\s*"?([^"\s]+)"?\s*$/m, "OpenAPI version"),
+  version,
+);
+
 const chartVersion = capture("charts/artificialflow/Chart.yaml", /^version:\s*"?([^"\s]+)"?\s*$/m, "Helm chart version");
 const appVersion = capture("charts/artificialflow/Chart.yaml", /^appVersion:\s*"?([^"\s]+)"?\s*$/m, "Helm appVersion");
 equal("charts/artificialflow/Chart.yaml version", chartVersion, version);
@@ -105,16 +116,26 @@ for (const image of applicationImages) {
   equal(`charts/artificialflow/values.yaml images.${image}.tag`, imageTags.get(image), version);
 }
 
-const compose = read("docker-compose.release.yml");
+const compose = read("docker-compose.yml");
 const composeDefaults = [
   ...compose.matchAll(/ARTIFICIALFLOW_IMAGE_TAG:-([^}]+)/g),
 ].map((match) => match[1]);
-if (composeDefaults.length !== 5) {
-  failures.push(`docker-compose.release.yml must define exactly five application image defaults; got ${composeDefaults.length}`);
+if (composeDefaults.length < applicationImages.size) {
+  failures.push(`docker-compose.yml must version every application image; got ${composeDefaults.length} defaults`);
 }
 composeDefaults.forEach((value, index) => {
-  equal(`docker-compose.release.yml application image default ${index + 1}`, value, version);
+  equal(`docker-compose.yml application image default ${index + 1}`, value, version);
 });
+equal(
+  "clients/dotnet-sdk Version",
+  capture("clients/dotnet-sdk/src/ArtificialFlow.Sdk/ArtificialFlow.Sdk.csproj", /<Version>([^<]+)<\/Version>/, ".NET SDK version"),
+  version,
+);
+equal(
+  "clients/java-sdk version",
+  capture("clients/java-sdk/pom.xml", /^\s{2}<version>([^<]+)<\/version>/m, "Java SDK version"),
+  version,
+);
 
 equal(
   "scripts/release_dry_run.sh default",
@@ -152,7 +173,7 @@ validateDocumentedVersions(
 );
 validateDocumentedVersions(
   "docs/RELEASE_CHECKLIST.md",
-  /v\d+\.\d+\.\d+/,
+  /validate_release_version.*--tag|ARTIFICIALFLOW_IMAGE_TAG=|git tag|git push/,
   version,
   true,
 );

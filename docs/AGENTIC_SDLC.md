@@ -39,7 +39,7 @@ Reusable prompts live under `.agents/`. The shared policy/config file is `.agent
 Expected triage evidence:
 
 - ArtificialFlow version or commit.
-- Deployment mode: external IAM Compose, bundled ZITADEL Compose, Helm external IAM, Helm bundled ZITADEL, or local development.
+- Deployment mode: Docker Compose or Helm (`IAM_DEPLOYMENT_MODE=true` external OIDC, or `false` no IAM), or local development.
 - A minimal BPMN file, API payload, SDK snippet, screenshot, or command log when relevant.
 - Expected behavior, actual behavior, and compatibility impact.
 - Whether an agent or maintainer can reproduce locally.
@@ -79,7 +79,7 @@ Default PR validation should favor fast checks:
 ```bash
 make test-unit
 make test-frontend
-make smoke-profiles
+make smoke
 make validate-helm
 ```
 
@@ -92,7 +92,7 @@ make worker-conformance
 make cqrs-e2e-smoke
 make test-perf
 make test-security
-make smoke-release-profiles
+make smoke-release
 make release-dry-run
 ```
 
@@ -174,8 +174,8 @@ Decision rules:
 Release agents use `docs/RELEASE_CHECKLIST.md` as the source of truth and cross-check:
 
 - CI and Security workflow status.
-- `make smoke-profiles`
-- `make smoke-release-profiles`
+- `make smoke`
+- `make smoke-release`
 - `make validate-helm`
 - `make release-dry-run`
 - Node SDK tests, package validation, npm pack dry run, and SBOM/provenance notes.

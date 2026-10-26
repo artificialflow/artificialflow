@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -57,7 +59,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
+		httpClient = &http.Client{
+			Timeout:   defaultHTTPTimeout,
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+		}
 	}
 
 	return &Client{

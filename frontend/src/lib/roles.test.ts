@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { IdentityResponse } from "./api";
 import {
   ARTIFICIALFLOW_ADMIN_ROLE,
+  ARTIFICIALFLOW_ANALYTICS_ROLE,
+  ARTIFICIALFLOW_BUSINESS_ROLE,
   ARTIFICIALFLOW_CLIENT_ROLE,
-  ARTIFICIALFLOW_MODELER_ROLE,
   canonicalizeRoles,
-  hasFlexRole,
   isAdmin,
+  isBusiness,
   isClientOnly,
 } from "./roles";
 
@@ -24,24 +25,26 @@ describe("role helpers", () => {
   it("canonicalizes standard roles and keeps custom roles", () => {
     expect(
       canonicalizeRoles([
-        " ArtificialFlow Admin ",
+        " ArtificialFlowAdmin ",
         ARTIFICIALFLOW_ADMIN_ROLE,
-        "artificialflow modeler",
-        "artificialflow client",
+        "ARTIFICIALFLOWBUSINESS",
+        "artificialflowclient",
+        "ArtificialFlowAnalytics",
         "Finance Reviewer",
       ]),
     ).toEqual([
       ARTIFICIALFLOW_ADMIN_ROLE,
-      ARTIFICIALFLOW_MODELER_ROLE,
+      ARTIFICIALFLOW_BUSINESS_ROLE,
       ARTIFICIALFLOW_CLIENT_ROLE,
+      ARTIFICIALFLOW_ANALYTICS_ROLE,
       "Finance Reviewer",
     ]);
   });
 
   it("authorizes claims through canonical role helpers", () => {
-    expect(isAdmin(identity(["artificialflow admin"]))).toBe(true);
-    expect(isClientOnly(identity(["ARTIFICIALFLOW CLIENT"]))).toBe(true);
-    expect(hasFlexRole(identity(["artificialflow modeler"]))).toBe(false);
-    expect(hasFlexRole(identity(["finance reviewer"]))).toBe(true);
+    expect(isAdmin(identity(["ArtificialFlowAdmin"]))).toBe(true);
+    expect(isBusiness(identity(["artificialflowbusiness"]))).toBe(true);
+    expect(isClientOnly(identity(["ARTIFICIALFLOWCLIENT"]))).toBe(true);
+    expect(isClientOnly(identity(["artificialflowclient", "artificialflowadmin"]))).toBe(false);
   });
 });
