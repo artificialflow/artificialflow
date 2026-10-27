@@ -60,7 +60,7 @@ while IFS=$'\t' read -r mode reference; do
     exit 1
   fi
   echo "trivy ${mode} ${reference}" | tee -a "${log}"
-  trivy image --exit-code "${exit_code}" --severity HIGH,CRITICAL --ignore-unfixed "${reference}" \
+  trivy image --timeout 20m --exit-code "${exit_code}" --severity HIGH,CRITICAL --ignore-unfixed "${reference}" \
     2>&1 | tee -a "${log}"
 done
 
