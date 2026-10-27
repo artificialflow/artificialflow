@@ -393,8 +393,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports
-          tag="${{ inputs.tag }}"
-          candidate_tag="candidate-${tag}-${GITHUB_SHA}"
+          release_tag="${{ inputs.tag }}"
+          candidate_tag="candidate-${release_tag}-${GITHUB_SHA}"
           : > /tmp/images.tsv
           for image in workflow-command workflow-runtime workflow-query sync-worker frontend; do
             repository="docker.io/artificialflow/${image}"
@@ -403,8 +403,8 @@ jobs:
             printf '%s\t%s\t%s\n' "${image}" "${repository}" "${digest}" >> /tmp/images.tsv
           done
           : > /tmp/dependencies.tsv
-          while IFS=$'\t' read -r name repository tag; do
-            digest="$(docker buildx imagetools inspect "${repository}:${tag}" --format '{{printf "%s" .Manifest.Digest}}')"
+          while IFS=$'\t' read -r name repository dependency_tag; do
+            digest="$(docker buildx imagetools inspect "${repository}:${dependency_tag}" --format '{{printf "%s" .Manifest.Digest}}')"
             [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
             printf '%s\t%s\t%s\n' "${name}" "${repository}" "${digest}" >> /tmp/dependencies.tsv
           done <<'DEPENDENCIES'
@@ -415,7 +415,7 @@ jobs:
           elasticsearch	docker.elastic.co/elasticsearch/elasticsearch	8.11.1
           DEPENDENCIES
           tree_sha="$(python3 scripts/release/evidence.py candidate-identity | python3 -c 'import json,sys; print(json.load(sys.stdin)["candidateTreeSha256"])')"
-          python3 - "${tag}" "${GITHUB_SHA}" "${tree_sha}" /tmp/images.tsv /tmp/dependencies.tsv > reports/candidate-images.json <<'PY'
+          python3 - "${release_tag}" "${GITHUB_SHA}" "${tree_sha}" /tmp/images.tsv /tmp/dependencies.tsv > reports/candidate-images.json <<'PY'
           import json, sys
           def load(path):
               result=[]
