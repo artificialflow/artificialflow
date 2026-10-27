@@ -22,7 +22,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
   Rendering fails on secrets placed in `env`.
 - Kafka with Debezium CDC is the only event transport. The `EVENT_BUS_TYPE`
   setting was removed.
-- Go toolchain is now 1.26.9 (`go 1.26.0` minimum) in `go.mod`, Dockerfiles,
+- Go toolchain is now 1.26.10 (`go 1.26.0` minimum) in `go.mod`, Dockerfiles,
   and CI.
 - Renamed roles to `artificialflowadmin` (full access), `artificialflowbusiness`
   (modeler: deploy/read workflows and decisions), `artificialflowclient`
@@ -79,9 +79,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Security
 
-- Patched govulncheck advisories in the Go standard library (Go 1.26.9),
-  `golang.org/x/net`, `golang.org/x/text`, OpenTelemetry (1.45.0), and gRPC
-  (1.83.2).
+- Patched govulncheck advisories in the Go standard library (Go 1.26.10,
+  including CVE-2026-111943 in `crypto/x509`), `github.com/klauspost/compress`
+  (1.18.7, CVE-2026-63209), `golang.org/x/net`, `golang.org/x/text`,
+  OpenTelemetry (1.45.0), and gRPC (1.83.2).
 - `make test-security` now scans the images Compose actually builds (it was
   scanning stale `artificialflow-*` images), builds govulncheck/gosec with the
   repo toolchain, and gates gosec on HIGH/MEDIUM findings only.

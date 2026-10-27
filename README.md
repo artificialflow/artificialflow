@@ -236,7 +236,7 @@ Project:
 Requirements:
 
 - Git and Make
-- Go 1.26.9 or a compatible Go 1.26 toolchain
+- Go 1.26.10 or a compatible Go 1.26 toolchain
 - Node.js 20+ and npm
 - Docker with Compose v2
 - Optional: .NET 8 SDK, Java 17 and Maven, Python 3.10+
