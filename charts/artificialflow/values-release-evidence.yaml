@@ -1,0 +1,45 @@
+# Topology for the self-hosted release evidence run.
+# Image digests come from the candidate lock, not from this file.
+# Postgres stays on the chart default (15) so an existing 15 data directory can open.
+iam:
+  mode: false
+ingress:
+  enabled: false
+gateway:
+  enabled: true
+  hsts:
+    enabled: false
+networkPolicy:
+  enabled: true
+replicaCount: {command: 2, query: 2, runtime: 3, syncWorker: 2, frontend: 1, gateway: 1}
+postgresql:
+  bundled:
+    size: 40Gi
+    resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
+search:
+  bundled:
+    javaOpts: -Xms512m -Xmx1g
+    size: 40Gi
+    resources: {requests: {cpu: 200m, memory: 1Gi}, limits: {cpu: "2", memory: 2Gi}}
+kafka:
+  bundled:
+    resources: {requests: {cpu: 200m, memory: 1Gi}, limits: {cpu: "2", memory: 2Gi}}
+connect:
+  bundled:
+    resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: "1", memory: 1536Mi}}
+command:
+  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+query:
+  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+runtime:
+  schedulerMode: multi-active
+  env:
+    OUTBOX_RELAY_INTERVAL: 10ms
+    OUTBOX_RELAY_BATCH_SIZE: "1000"
+  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+syncWorker:
+  env:
+    SYNC_PROJECTION_CONTRACT: event-first
+    KAFKA_TOPICS: workflow.events.v1
+    CONNECT_BOOTSTRAP_ENABLED: "false"
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: "1", memory: 512Mi}}

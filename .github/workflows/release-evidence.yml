@@ -64,17 +64,17 @@ jobs:
       - name: Install, upgrade, rollback, and enforce network policy
         env:
           CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
-          KIND_VALUES_FILE: ${{ vars.KIND_VALUES_FILE }}
+          KIND_VALUES_FILE: charts/artificialflow/values-release-evidence.yaml
           KIND_WORKER_COUNT: "2"
           KEEP_KIND_CLUSTER: "true"
         run: bash scripts/release/kind_helm_smoke.sh
 
+      - name: Publish command and query for evidence traffic
+        run: bash scripts/release/expose_evidence_endpoints.sh
+
       - name: Execute recovery chaos
         env:
-          CHAOS_ASSERT_COMMAND: ${{ vars.CHAOS_ASSERT_COMMAND }}
-          KAFKA_RESOURCE: ${{ vars.KAFKA_RESOURCE }}
-          SYNC_RESOURCE: ${{ vars.SYNC_RESOURCE }}
-          DATABASE_RESOURCE: ${{ vars.DATABASE_RESOURCE }}
+          CHAOS_ASSERT_COMMAND: COMMAND_URL=http://127.0.0.1:18080 QUERY_URL=http://127.0.0.1:18081 python3 scripts/release/assert_evidence_transaction.py
         run: |
           set -euo pipefail
           CHAOS_SCENARIO=pod-kill bash scripts/release/chaos.sh
@@ -85,29 +85,21 @@ jobs:
       - name: Execute unchanged-digest soak
         env:
           CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
-          AUTH_TOKEN: ${{ secrets.RELEASE_AUTH_TOKEN }}
-          WORKFLOW_ID: ${{ vars.RELEASE_WORKFLOW_ID }}
-          COMMAND_URL: ${{ vars.RELEASE_COMMAND_URL }}
-          QUERY_URL: ${{ vars.RELEASE_QUERY_URL }}
+          AUTH_TOKEN: disabled
+          WORKFLOW_ID: release-soak
+          COMMAND_URL: http://127.0.0.1:18080
+          QUERY_URL: http://127.0.0.1:18081
         run: bash scripts/release/run_soak.sh
 
       - name: Execute backup restore and projection rebuild
-        env:
-          BACKUP_COMMAND: ${{ vars.BACKUP_COMMAND }}
-          RESTORE_COMMAND: ${{ vars.RESTORE_COMMAND }}
-          BACKUP_ARTIFACT: ${{ vars.BACKUP_ARTIFACT }}
-          DATASET_FINGERPRINT_COMMAND: ${{ vars.DATASET_FINGERPRINT_COMMAND }}
-          PROJECTION_REBUILD_COMMAND: ${{ vars.PROJECTION_REBUILD_COMMAND }}
-          PROJECTION_PARITY_COMMAND: ${{ vars.PROJECTION_PARITY_COMMAND }}
-        run: |
-          set -euo pipefail
-          MODE=backup-restore bash scripts/release/data_recovery_gate.sh
-          MODE=projection-rebuild bash scripts/release/data_recovery_gate.sh
+        run: bash scripts/release/run_evidence_recovery.sh
 
       - name: Execute two clean post-soak functional suites
         env:
           CANDIDATE_IMAGE_LOCK: reports/candidate-images.json
-          FUNCTIONAL_SUITE_COMMAND: ${{ vars.FUNCTIONAL_SUITE_COMMAND }}
+          COMMAND_URL: http://127.0.0.1:18080
+          QUERY_URL: http://127.0.0.1:18081
+          FUNCTIONAL_SUITE_COMMAND: python3 scripts/release/assert_evidence_transaction.py
         run: bash scripts/release/post_soak_functional.sh
 
       - name: Execute blocking security policy
