@@ -43,7 +43,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       "$@" \
       -v "${CONFIG}:/etc/nginx/templates/default.conf.template:ro" \
       -v "${ROOT}/gateway/oidc-csp.envsh:/docker-entrypoint.d/15-oidc-csp.envsh:ro" \
-      nginx:alpine sh -c '/docker-entrypoint.sh nginx -t >/dev/null 2>&1 && grep -o "connect-src[^;]*" /etc/nginx/conf.d/default.conf'
+      nginx:1.31.7-alpine sh -c '/docker-entrypoint.sh nginx -t >/dev/null 2>&1 && grep -o "connect-src[^;]*" /etc/nginx/conf.d/default.conf'
   }
   csp="$(render_gateway -e IAM_DEPLOYMENT_MODE=true -e OIDC_AUTHORITY=https://login.example.com:8443/realms/artificialflow)"
   [[ "${csp}" == "connect-src 'self' https://login.example.com:8443" ]] || {

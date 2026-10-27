@@ -39,7 +39,7 @@ x-kafka-env: &kafka-env
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15.19-alpine
     command: postgres -c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-artificialflow}
@@ -50,7 +50,7 @@ services:
     healthcheck: {test: "pg_isready -U $${POSTGRES_USER} -d workflow_db", interval: 5s, timeout: 5s, retries: 5}
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
@@ -60,7 +60,7 @@ services:
     healthcheck: {test: "curl -s http://localhost:9200 >/dev/null", interval: 5s, timeout: 5s, retries: 20, start_period: 60s}
 
   kafka:
-    image: confluentinc/cp-kafka:7.6.1
+    image: apache/kafka:4.4.0
     environment:
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
       KAFKA_NODE_ID: 1
@@ -74,11 +74,13 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
     ports: ["9092:9092"]
-    healthcheck: {test: "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1", interval: 10s, timeout: 10s, retries: 15}
+    healthcheck: {test: "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1", interval: 10s, timeout: 10s, retries: 15}
 
   connect:
-    image: debezium/connect:2.6
+    image: debezium/connect:3.0.0.Final
     environment:
       BOOTSTRAP_SERVERS: kafka:29092
       GROUP_ID: artificialflow-debezium
@@ -181,7 +183,7 @@ services:
 
   gateway:
     restart: unless-stopped
-    image: nginx:alpine
+    image: nginx:1.31.7-alpine
     ports: ["${FRONTEND_PORT:-9100}:80"]
     environment:
       # The CSP allows browser calls to this provider's origin when IAM is on.

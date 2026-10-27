@@ -61,7 +61,7 @@ images:
     tag: "1.2.0"
   gateway:
     repository: nginxinc/nginx-unprivileged
-    tag: "1.27-alpine"
+    tag: "1.31.7-alpine"
 
 replicaCount: {command: 2, query: 2, runtime: 1, syncWorker: 1, frontend: 2, gateway: 2}
 
@@ -94,7 +94,7 @@ gateway:
 postgresql:
   bundled:
     enabled: true
-    image: {repository: postgres, tag: 15-alpine}
+    image: {repository: postgres, tag: 15.19-alpine}
     size: 20Gi
     storageClassName: ""
     resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1Gi}}
@@ -112,7 +112,7 @@ postgresql:
 search:
   bundled:
     enabled: true
-    image: {repository: docker.elastic.co/elasticsearch/elasticsearch, tag: "8.11.1"}
+    image: {repository: docker.elastic.co/elasticsearch/elasticsearch, tag: "8.19.23"}
     javaOpts: -Xms512m -Xmx512m
     size: 20Gi
     storageClassName: ""
@@ -125,7 +125,7 @@ kafka:
   topicPartitions: 3
   bundled:
     enabled: true
-    image: {repository: confluentinc/cp-kafka, tag: "7.6.1"}
+    image: {repository: apache/kafka, tag: "4.4.0"}
     size: 20Gi
     storageClassName: ""
     resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: 2000m, memory: 2Gi}}
@@ -134,7 +134,7 @@ kafka:
 connect:
   bundled:
     enabled: true
-    image: {repository: debezium/connect, tag: "2.6"}
+    image: {repository: debezium/connect, tag: "3.0.0.Final"}
     resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: 2000m, memory: 2Gi}}
   url: "" # required when not bundled
 

@@ -17,10 +17,12 @@ namespace. Both names resolve to the same multi-platform manifest digest.
 The application images run as the non-root user `artificialflow` (UID and GID
 `10001`).
 
-Compose and the Helm chart also use third-party images: `postgres:15-alpine`,
-`docker.elastic.co/elasticsearch/elasticsearch:8.11.1`,
-`confluentinc/cp-kafka:7.6.1`, `debezium/connect:2.6`, and `nginx:alpine` for
-the gateway.
+Compose and the Helm chart use published upstream images, not rebuilt
+forks: `postgres:15.19-alpine`,
+`docker.elastic.co/elasticsearch/elasticsearch:8.19.23`,
+`apache/kafka:4.4.0`, `debezium/connect:3.0.0.Final`,
+`nginxinc/nginx-unprivileged:1.31.7-alpine` for the Helm gateway, and
+`nginx:1.31.7-alpine` for the Compose gateway.
 
 ## Tags
 

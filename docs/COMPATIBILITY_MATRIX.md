@@ -49,7 +49,7 @@ See also [EXTERNAL_BPMN_IMPORT.md](EXTERNAL_BPMN_IMPORT.md) and [HA_REFERENCE.md
 
 | Deployment | IAM mode | Dependencies | Status |
 | :--- | :--- | :--- | :--- |
-| Docker Compose (`make up`) | `IAM_DEPLOYMENT_MODE=false` (default; console `admin`/`admin`, tokenless API) or `true` (your OIDC provider) | Postgres 15, Kafka 7.6 (KRaft), Debezium Connect 2.6, Elasticsearch 8.11 | Development and evaluation |
+| Docker Compose (`make up`) | `IAM_DEPLOYMENT_MODE=false` (default; console `admin`/`admin`, tokenless API) or `true` (your OIDC provider) | Postgres 15.19, Apache Kafka 4.4 (KRaft), Debezium Connect 3.0, Elasticsearch 8.19 | Development and evaluation |
 | Docker Compose (`make up-release`) | Same | Same, with published `artificialflow/*` images | Evaluation of a release |
 | Helm | `iam.mode: true` (default) or `false` | Bundled StatefulSets by default, or managed services | Production path |
 

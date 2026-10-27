@@ -151,6 +151,8 @@ kafka:
     - {name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1"}
     - {name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1"}
     - {name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1"}
+    - {name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR, value: "1"}
+    - {name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR, value: "1"}
     - {name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data}
   readinessProbe: {tcpSocket: {port: kafka}, initialDelaySeconds: 20, periodSeconds: 10}
   persistence: {size: {{ $v.kafka.bundled.size }}, storageClassName: {{ $v.kafka.bundled.storageClassName | quote }}, mountPath: /var/lib/kafka/data}

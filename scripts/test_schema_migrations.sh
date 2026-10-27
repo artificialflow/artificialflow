@@ -31,7 +31,7 @@ docker run -d --name "${name}" \
   -e POSTGRES_PASSWORD="${password}" \
   -e POSTGRES_DB=workflow_db \
   -p "127.0.0.1:${port}:5432" \
-  postgres:15-alpine >/dev/null
+  postgres:15.19-alpine >/dev/null
 
 for _ in $(seq 1 30); do
   if docker exec "${name}" pg_isready -U artificialflow -d workflow_db >/dev/null 2>&1; then

@@ -408,11 +408,11 @@ jobs:
             [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
             printf '%s\t%s\t%s\n' "${name}" "${repository}" "${digest}" >> /tmp/dependencies.tsv
           done <<'DEPENDENCIES'
-          gateway	docker.io/nginxinc/nginx-unprivileged	1.27-alpine
-          postgresql	docker.io/library/postgres	15-alpine
-          kafka	docker.io/confluentinc/cp-kafka	7.6.1
-          debezium-connect	docker.io/debezium/connect	2.6
-          elasticsearch	docker.elastic.co/elasticsearch/elasticsearch	8.11.1
+          gateway	docker.io/nginxinc/nginx-unprivileged	1.31.7-alpine
+          postgresql	docker.io/library/postgres	15.19-alpine
+          kafka	docker.io/apache/kafka	4.4.0
+          debezium-connect	docker.io/debezium/connect	3.0.0.Final
+          elasticsearch	docker.elastic.co/elasticsearch/elasticsearch	8.19.23
           DEPENDENCIES
           tree_sha="$(python3 scripts/release/evidence.py candidate-identity | python3 -c 'import json,sys; print(json.load(sys.stdin)["candidateTreeSha256"])')"
           python3 - "${release_tag}" "${GITHUB_SHA}" "${tree_sha}" /tmp/images.tsv /tmp/dependencies.tsv > reports/candidate-images.json <<'PY'

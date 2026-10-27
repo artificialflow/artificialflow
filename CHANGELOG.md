@@ -79,6 +79,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Security
 
+- Bundled dependencies now use current upstream images: Postgres 15.19,
+  Elasticsearch 8.19.23, Apache Kafka 4.4.0, Debezium Connect 3.0.0.Final,
+  and nginx 1.31.7. The broker is the Apache Kafka image, with the same
+  listener ports the applications already use.
 - Patched govulncheck advisories in the Go standard library (Go 1.26.10,
   including CVE-2026-111943 in `crypto/x509`), `github.com/klauspost/compress`
   (1.18.7, CVE-2026-63209), `golang.org/x/net`, `golang.org/x/text`,
