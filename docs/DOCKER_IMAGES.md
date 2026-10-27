@@ -22,7 +22,9 @@ forks: `postgres:15.19-alpine`,
 `docker.elastic.co/elasticsearch/elasticsearch:8.19.23`,
 `apache/kafka:4.4.0`, `debezium/connect:3.0.0.Final`,
 `nginxinc/nginx-unprivileged:1.31.7-alpine` for the Helm gateway, and
-`nginx:1.31.7-alpine` for the Compose gateway.
+`nginx:1.31.7-alpine` for the Compose gateway. Those tags are the community
+stables recorded in `release/upstream-images.tsv`. The release scan keeps
+their findings on record and does not block while the lock matches them.
 
 ## Tags
 

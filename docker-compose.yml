@@ -91,7 +91,7 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      ENABLE_DEBEZIUM_SCRIPTING: "true"
+      ENABLE_DEBEZIUM_SCRIPTING: "false"
     ports: ["8083:8083"]
     depends_on: {postgres: {condition: service_healthy}, kafka: {condition: service_healthy}}
     healthcheck: {test: "curl -sf http://localhost:8083/connectors >/dev/null", interval: 10s, timeout: 5s, retries: 15}

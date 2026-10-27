@@ -403,17 +403,12 @@ jobs:
             printf '%s\t%s\t%s\n' "${image}" "${repository}" "${digest}" >> /tmp/images.tsv
           done
           : > /tmp/dependencies.tsv
-          while IFS=$'\t' read -r name repository dependency_tag; do
+          while IFS=$'\t' read -r name repository dependency_tag locked; do
+            [[ -z "${name}" || "${name}" == \#* || "${locked}" != yes ]] && continue
             digest="$(docker buildx imagetools inspect "${repository}:${dependency_tag}" --format '{{printf "%s" .Manifest.Digest}}')"
             [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
             printf '%s\t%s\t%s\n' "${name}" "${repository}" "${digest}" >> /tmp/dependencies.tsv
-          done <<'DEPENDENCIES'
-          gateway	docker.io/nginxinc/nginx-unprivileged	1.31.7-alpine
-          postgresql	docker.io/library/postgres	15.19-alpine
-          kafka	docker.io/apache/kafka	4.4.0
-          debezium-connect	docker.io/debezium/connect	3.0.0.Final
-          elasticsearch	docker.elastic.co/elasticsearch/elasticsearch	8.19.23
-          DEPENDENCIES
+          done < release/upstream-images.tsv
           tree_sha="$(python3 scripts/release/evidence.py candidate-identity | python3 -c 'import json,sys; print(json.load(sys.stdin)["candidateTreeSha256"])')"
           python3 - "${release_tag}" "${GITHUB_SHA}" "${tree_sha}" /tmp/images.tsv /tmp/dependencies.tsv > reports/candidate-images.json <<'PY'
           import json, sys

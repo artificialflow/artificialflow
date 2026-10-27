@@ -199,6 +199,11 @@ requireText(
   "bash scripts/release/security_gate.sh",
   "production evidence workflow is missing the blocking security gate",
 );
+requireText(
+  imageWorkflow,
+  "release/upstream-images.tsv",
+  "the image lock must read the community image pin file",
+);
 requireOrder(
   imageWorkflow,
   "Scan candidate digest",

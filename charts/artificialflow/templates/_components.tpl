@@ -175,7 +175,7 @@ connect:
     - {name: VALUE_CONVERTER, value: org.apache.kafka.connect.json.JsonConverter}
     - {name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "false"}
     - {name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "false"}
-    - {name: ENABLE_DEBEZIUM_SCRIPTING, value: "true"}
+    - {name: ENABLE_DEBEZIUM_SCRIPTING, value: "false"}
   readinessProbe: {httpGet: {path: /connectors, port: http}, initialDelaySeconds: 20, periodSeconds: 10}
   volumeMounts: [{name: tmp, mountPath: /tmp}]
   volumes: [{name: tmp, emptyDir: {}}]

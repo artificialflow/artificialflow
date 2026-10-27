@@ -103,7 +103,7 @@ Security gates include:
 | Go vulnerabilities | `govulncheck` and `make test-security`. | Block reachable high/critical vulnerabilities unless a documented maintainer exception exists. |
 | npm vulnerabilities | npm audit for `frontend` and `clients/nodejs-sdk`. | Block production high/critical vulnerabilities. |
 | Go SAST | gosec in security workflow and `make test-security`. | Block high-confidence high severity findings; review medium findings. |
-| Container/filesystem scan | Trivy filesystem/image scans. | Block high/critical findings in release images or required CI scans. |
+| Container/filesystem scan | Trivy filesystem/image scans. | Block high/critical findings in ArtificialFlow images. Scan community images and block only when their pin is not the current stable tag in `release/upstream-images.tsv`. |
 | CodeQL | Security workflow for public repositories. | Block actionable high/critical alerts after maintainer review. |
 | DAST | `make test-dast` (OWASP ZAP baseline against live gateway). | Block unallowlisted High findings; allowlist in `tests/security/dast-allowlist.txt`. |
 | Dependency updates | Dependabot and dependency policy. | Require review for runtime, auth, parser, Docker, GitHub Actions, and release tooling changes. |

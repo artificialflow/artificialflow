@@ -27,21 +27,40 @@ gosec -version | grep -F "Version: 2.22.8"
     npm --prefix clients/nodejs-sdk audit --audit-level=high --omit=dev
     npm --prefix tests/e2e/playwright audit --audit-level=high --omit=dev
   )
+  python3 "${root}/scripts/release/upstream_images.py" check-sources
   python3 - "${lock}" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1], encoding="utf-8"))
-for image in data["images"] + data["dependencies"]:
+for image in data["images"]:
     print(f"{image['repository']}@{image['digest']}")
 PY
 } 2>&1 | tee "${log}"
 
-python3 - "${lock}" <<'PY' | while IFS= read -r reference; do
-import json, sys
-data=json.load(open(sys.argv[1], encoding="utf-8"))
-for image in data["images"] + data["dependencies"]:
-    print(f"{image['repository']}@{image['digest']}")
-PY
-  trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "${reference}" \
+# Community images are scanned for the record. A finding blocks only when the
+# lock is not the tag in release/upstream-images.tsv, which means an upgrade
+# is still required. Application images keep a zero HIGH/CRITICAL gate.
+python3 "${root}/scripts/release/upstream_images.py" lock-lines "${lock}" |
+while IFS=$'\t' read -r name repository tag digest; do
+  published="$(docker buildx imagetools inspect "${repository}:${tag}" --format '{{printf "%s" .Manifest.Digest}}')"
+  if [[ "${published}" != "${digest}" ]]; then
+    echo "${name} must be upgraded to ${repository}:${tag} before release; lock is ${digest}, published tag is ${published}" >&2
+    exit 1
+  fi
+  echo "community image ${name} matches ${repository}:${tag}" | tee -a "${log}"
+done
+
+python3 "${root}/scripts/release/upstream_images.py" scan-plan "${lock}" |
+while IFS=$'\t' read -r mode reference; do
+  if [[ "${mode}" == "blocking" ]]; then
+    exit_code=1
+  elif [[ "${mode}" == "report" ]]; then
+    exit_code=0
+  else
+    echo "unknown scan mode ${mode}" >&2
+    exit 1
+  fi
+  echo "trivy ${mode} ${reference}" | tee -a "${log}"
+  trivy image --exit-code "${exit_code}" --severity HIGH,CRITICAL --ignore-unfixed "${reference}" \
     2>&1 | tee -a "${log}"
 done
 

@@ -40,6 +40,7 @@ jobs:
           node scripts/validate_release_workflows.mjs
           python3 scripts/release/evidence.py validate-manifest
           python3 scripts/release/test_evidence.py
+          python3 scripts/release/test_upstream_images.py
           bash -n scripts/release/*.sh scripts/quality/*.sh scripts/test-security.sh
           python3 scripts/quality/maintainability.py
 

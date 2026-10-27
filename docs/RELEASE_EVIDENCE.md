@@ -15,7 +15,9 @@ Cluster and recovery gates stay valid for 168 hours: REL-003, REL-004, REL-005,
 REL-006, REL-007, REL-008, REL-009, REL-010, and REL-013. Checks that rerun in
 minutes stay valid for 24 hours: REL-001, REL-002, REL-011, and REL-012. The
 candidate tree includes every tracked file, including documentation changed
-before or after a gate run.
+before or after a gate run. REL-011 still blocks on ArtificialFlow image
+findings, secrets, and an outdated community image pin. Findings in the
+current community image tags are recorded and do not block the release.
 
 ## Candidate identity
 

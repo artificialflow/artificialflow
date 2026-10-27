@@ -1,0 +1,13 @@
+# Community images pinned for this stack. Update a row when that project
+# publishes a newer stable tag that this stack can run. locked=yes rows are
+# the release lock. Their scan is recorded and does not block while the lock
+# digest is that tag. A different digest blocks the release until the pin is
+# upgraded. Postgres stays on the latest 15 release so existing data
+# directories open. Elasticsearch stays on the latest 8.19 release because
+# the application client is the 8.x client.
+gateway	docker.io/nginxinc/nginx-unprivileged	1.31.7-alpine	yes
+postgresql	docker.io/library/postgres	15.19-alpine	yes
+kafka	docker.io/apache/kafka	4.4.0	yes
+debezium-connect	docker.io/debezium/connect	3.0.0.Final	yes
+elasticsearch	docker.elastic.co/elasticsearch/elasticsearch	8.19.23	yes
+compose-gateway	docker.io/library/nginx	1.31.7-alpine	no

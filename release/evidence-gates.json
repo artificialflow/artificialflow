@@ -319,9 +319,10 @@
       "timeoutSeconds": 3600,
       "retries": 0,
       "threshold": {
-        "high": 0,
-        "critical": 0,
-        "secretLeaks": 0
+        "applicationHigh": 0,
+        "applicationCritical": 0,
+        "secretLeaks": 0,
+        "upstreamCommunityImages": "scan-only-when-current"
       },
       "blocking": true,
       "retentionDays": 365,
