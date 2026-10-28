@@ -25,7 +25,7 @@ jobs:
   release-evidence:
     name: Execute production evidence manifest
     runs-on: [self-hosted, linux, release-evidence]
-    timeout-minutes: 355
+    timeout-minutes: 480
     environment:
       name: release-evidence
     steps:
