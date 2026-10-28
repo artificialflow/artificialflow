@@ -106,7 +106,11 @@ postgresql:
   enabled: {{ $v.postgresql.bundled.enabled }}
   kind: StatefulSet
   image: {{ toJson $v.postgresql.bundled.image }}
-  args: [postgres, -c, wal_level=logical, -c, max_wal_senders=10, -c, max_replication_slots=10]
+  {{ $pgArgs := list "postgres" "-c" "wal_level=logical" "-c" "max_wal_senders=10" "-c" "max_replication_slots=10" }}
+  {{- range $param := $v.postgresql.bundled.parameters }}
+  {{- $pgArgs = concat $pgArgs (list "-c" $param) }}
+  {{- end }}
+  args: {{ toJson $pgArgs }}
   ports: {postgres: 5432}
   servicePorts: {postgres: {{ $v.postgresql.port }}}
   env:

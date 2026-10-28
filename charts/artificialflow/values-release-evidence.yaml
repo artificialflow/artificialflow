@@ -15,7 +15,14 @@ replicaCount: {command: 2, query: 2, runtime: 3, syncWorker: 2, frontend: 1, gat
 postgresql:
   bundled:
     size: 40Gi
-    resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
+    # Spread checkpoints so the last hour of the soak does not stall writers.
+    parameters:
+      - max_wal_size=4GB
+      - min_wal_size=1GB
+      - checkpoint_timeout=15min
+      - checkpoint_completion_target=0.9
+      - shared_buffers=512MB
+    resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "4", memory: 4Gi}}
 search:
   bundled:
     javaOpts: -Xms512m -Xmx1g
@@ -28,15 +35,15 @@ connect:
   bundled:
     resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: "1", memory: 1536Mi}}
 command:
-  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+  resources: {requests: {cpu: 500m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
 query:
-  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+  resources: {requests: {cpu: 500m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
 runtime:
   schedulerMode: multi-active
   env:
     OUTBOX_RELAY_INTERVAL: 10ms
     OUTBOX_RELAY_BATCH_SIZE: "1000"
-  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+  resources: {requests: {cpu: 500m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
 syncWorker:
   env:
     SYNC_PROJECTION_CONTRACT: event-first

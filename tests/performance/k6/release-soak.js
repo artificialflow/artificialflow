@@ -26,7 +26,7 @@ export const options = {
       timeUnit: "1s",
       duration: soakDuration,
       preAllocatedVUs: 150,
-      maxVUs: 150,
+      maxVUs: 400,
       exec: "runWorkflowThroughput",
     },
     query_read_load: {
@@ -44,7 +44,7 @@ export const options = {
       timeUnit: "1s",
       duration: soakDuration,
       preAllocatedVUs: 150,
-      maxVUs: 150,
+      maxVUs: 400,
       exec: "runWorkerActivateJobs",
     },
     cqrs_visibility: {
