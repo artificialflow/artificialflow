@@ -89,7 +89,9 @@ jobs:
           WORKFLOW_ID: release-soak
           COMMAND_URL: http://127.0.0.1:18080
           QUERY_URL: http://127.0.0.1:18081
-        run: bash scripts/release/run_soak.sh
+        run: |
+          set -o pipefail
+          bash scripts/release/run_soak.sh | tee /tmp/artificialflow-soak-live.log
 
       - name: Execute backup restore and projection rebuild
         run: bash scripts/release/run_evidence_recovery.sh
