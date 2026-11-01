@@ -6,7 +6,7 @@ CONFIG="${ROOT}/gateway/nginx.conf"
 
 require() {
   local pattern="$1"
-  if ! rg -q -- "${pattern}" "${CONFIG}"; then
+  if ! grep -E -q -- "${pattern}" "${CONFIG}"; then
     echo "gateway security validation missing: ${pattern}" >&2
     exit 1
   fi
@@ -21,11 +21,11 @@ require 'proxy_connect_timeout'
 require 'limit_req zone='
 require 'X-Forwarded-For \$remote_addr'
 
-if rg -q "Access-Control-Allow-Origin['\" ]+\\*" "${CONFIG}"; then
+if grep -E -q -- "Access-Control-Allow-Origin['\" ]+\\*" "${CONFIG}"; then
   echo "wildcard gateway CORS is forbidden" >&2
   exit 1
 fi
-if rg -q "Strict-Transport-Security" "${CONFIG}"; then
+if grep -E -q -- "Strict-Transport-Security" "${CONFIG}"; then
   echo "development HTTP gateway must not emit HSTS" >&2
   exit 1
 fi

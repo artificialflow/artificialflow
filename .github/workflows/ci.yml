@@ -210,13 +210,13 @@ jobs:
           dotnet-version: "8.x"
 
       - name: Build
-        run: dotnet build ArtificialFlow.Sdk.sln
+        run: dotnet build ArtificialFlow.Sdk.sln -c Release
 
       - name: Test
-        run: dotnet test ArtificialFlow.Sdk.sln --no-build
+        run: dotnet test ArtificialFlow.Sdk.sln --no-build -c Release
 
       - name: Pack
-        run: dotnet pack src/ArtificialFlow.Sdk/ArtificialFlow.Sdk.csproj --no-build -o artifacts
+        run: dotnet pack src/ArtificialFlow.Sdk/ArtificialFlow.Sdk.csproj --no-build -c Release -o artifacts
 
   java-sdk:
     name: Java SDK

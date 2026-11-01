@@ -30,7 +30,7 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>17</maven.compiler.release>
-    <jackson.version>2.18.2</jackson.version>
+    <jackson.version>2.18.12</jackson.version>
     <junit.version>5.11.4</junit.version>
     <gpg.skip>true</gpg.skip>
   </properties>
