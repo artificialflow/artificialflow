@@ -1,7 +1,7 @@
 {
   "aggregate_min": 37.5,
   "packages": {
-    "backend/libs/auth": 65.3,
+    "backend/libs/auth": 80.0,
     "backend/services/workflow-command/internal/application": 20.0,
     "backend/services/workflow-command/internal/domain/bpmn": 78.0,
     "backend/services/workflow-command/internal/infrastructure/persistence": 45.0,
