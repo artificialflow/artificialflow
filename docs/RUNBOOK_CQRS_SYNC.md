@@ -8,7 +8,7 @@ Review:
 - Query service `/health`.
 - Kafka consumer group assignments.
 - Debezium connector status.
-- Elasticsearch/OpenSearch index document counts.
+- Elasticsearch index document counts.
 
 ## Checks
 

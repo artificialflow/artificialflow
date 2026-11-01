@@ -8,7 +8,7 @@ Branch: `release/v0.4.0-train` (product + UX + BPMN + Phase T harness).
 node scripts/validate_release_version.mjs
 make test-release-suite
 # stack up:
-make up-zitadel
+make up
 make test-all && make test-all-functionality
 make test-dast
 ARTIFICIALFLOW_TOKEN=... make test-uat-mega-bpmn
@@ -16,7 +16,7 @@ make release-dry-run
 git tag -s v0.4.0 -m "ArtificialFlow v0.4.0"
 git push origin v0.4.0
 # trigger Release workflow / publish images
-ARTIFICIALFLOW_IMAGE_TAG=v0.4.0 make smoke-release-profiles
+ARTIFICIALFLOW_IMAGE_TAG=v0.4.0 make smoke-release
 # refresh docs/CAPACITY.md from make test-perf
 ```
 
@@ -32,7 +32,7 @@ make test-bpmn-matrix
 # freeze surfaces per docs/STABILITY_POLICY.md
 git tag -s v1.0.0-rc.1 -m "ArtificialFlow v1.0.0-rc.1"
 # re-run full Phase T on RC images
-ARTIFICIALFLOW_IMAGE_TAG=v1.0.0-rc.1 make smoke-release-profiles
+ARTIFICIALFLOW_IMAGE_TAG=v1.0.0-rc.1 make smoke-release
 ARTIFICIALFLOW_IMAGE_TAG=v1.0.0-rc.1 make test-release-suite
 ```
 

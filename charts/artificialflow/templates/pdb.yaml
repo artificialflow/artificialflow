@@ -1,66 +1,20 @@
 {{- if .Values.podDisruptionBudget.enabled }}
-{{- if and (ge (int .Values.replicaCount.command) 2) .Values.podDisruptionBudget.command.minAvailable }}
+{{- range $component, $minAvailable := .Values.podDisruptionBudget.minAvailable }}
+{{- if and $minAvailable (ge (int (index $.Values.replicaCount $component)) 2) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "artificialflow.fullname" . }}-command
+  name: {{ include "artificialflow.fullname" $ }}-{{ $component }}
   labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: command
+    {{- include "artificialflow.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.command.minAvailable }}
+  minAvailable: {{ $minAvailable }}
   selector:
     matchLabels:
-      {{- include "artificialflow.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: command
+      {{- include "artificialflow.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
 {{- end }}
-{{- if and (ge (int .Values.replicaCount.query) 2) .Values.podDisruptionBudget.query.minAvailable }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "artificialflow.fullname" . }}-query
-  labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: query
-spec:
-  minAvailable: {{ .Values.podDisruptionBudget.query.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "artificialflow.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: query
-{{- end }}
-{{- if and (ge (int .Values.replicaCount.frontend) 2) .Values.podDisruptionBudget.frontend.minAvailable }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "artificialflow.fullname" . }}-frontend
-  labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: frontend
-spec:
-  minAvailable: {{ .Values.podDisruptionBudget.frontend.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "artificialflow.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: frontend
-{{- end }}
-{{- if and (ge (int .Values.replicaCount.gateway) 2) .Values.podDisruptionBudget.gateway.minAvailable }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "artificialflow.fullname" . }}-gateway
-  labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gateway
-spec:
-  minAvailable: {{ .Values.podDisruptionBudget.gateway.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "artificialflow.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: gateway
 {{- end }}
 {{- end }}

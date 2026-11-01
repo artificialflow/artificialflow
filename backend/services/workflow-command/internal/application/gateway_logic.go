@@ -365,9 +365,12 @@ func (e *Engine) cancelEventGatewaySiblings(ctx context.Context, instance *model
 						State:   "TERMINATED",
 						EndTime: time.Now(),
 					}
-					// Fire and forget update
-					e.repo.UpdateElementInstance(ctx, el)
-					e.cancelCreatedTimersForElementInstance(ctx, ex.ElementInstanceKey)
+					if err := e.repo.UpdateElementInstance(ctx, el); err != nil {
+						return err
+					}
+					if err := e.cancelCreatedTimersForElementInstance(ctx, ex.ElementInstanceKey, 0); err != nil {
+						return err
+					}
 				}
 			}
 		}

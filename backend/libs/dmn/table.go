@@ -26,6 +26,9 @@ type Condition struct {
 }
 
 func Parse(raw []byte) (*DecisionTable, error) {
+	if strings.HasPrefix(strings.TrimSpace(string(raw)), "<") {
+		return parseXML(raw)
+	}
 	var table DecisionTable
 	if err := json.Unmarshal(raw, &table); err != nil {
 		return nil, err
@@ -35,6 +38,19 @@ func Parse(raw []byte) (*DecisionTable, error) {
 	}
 	if table.HitPolicy == "" {
 		table.HitPolicy = "FIRST"
+	}
+	if strings.ToUpper(table.HitPolicy) != "FIRST" {
+		return nil, fmt.Errorf("unsupported hit policy %q; supported subset: FIRST", table.HitPolicy)
+	}
+	table.HitPolicy = "FIRST"
+	for ruleIndex, rule := range table.Rules {
+		for key, condition := range rule.When {
+			switch strings.ToLower(strings.TrimSpace(condition.Op)) {
+			case "", "eq", "neq", "gt", "gte", "lt", "lte", "exists":
+			default:
+				return nil, fmt.Errorf("rule %d input %q uses unsupported operator %q", ruleIndex+1, key, condition.Op)
+			}
+		}
 	}
 	return &table, nil
 }

@@ -50,7 +50,7 @@ Focused helpers:
 | IAM and authorization | Auth library tests, HTTP authorization tests, deployment IAM docs. | Require role/claim tests and manual review for auth mode, audience, or role mapping changes. |
 | Frontend modeler/admin UI | Vitest helper/API tests and lightweight Playwright. | Recommend lint/test/build for all frontend changes and deeper Playwright/manual QA for routed UI flows. |
 | Node.js SDK | SDK tests, package validation, npm pack dry run. | Require SDK tests and package validation for public method, auth, worker, or packaging changes. |
-| Docker Compose and Helm | `make smoke-profiles`, `make smoke-release-profiles`, `make validate-helm`. | Require compose/Helm validation for deployment asset changes. |
+| Docker Compose and Helm | `make smoke`, `make smoke-release`, `make validate-helm`. | Require compose/Helm validation for deployment asset changes. |
 
 ## Non-Functional QA Matrix
 
@@ -71,7 +71,7 @@ Focused helpers:
 | Worker activates and completes jobs | Worker conformance and backend tests. | Expand real-job conformance cases for complete, fail, extend-lock, timeout, and retry behavior. |
 | Command writes appear in query read model | `make cqrs-e2e-smoke`, `make cqrs-parity-check`. | Add failure-mode coverage for lag, duplicate events, replay, and backfill. |
 | Frontend dashboard/process/instance navigation | Basic page-load coverage. | Add realistic UI paths for dashboard, processes, instances, empty/loading/error states. |
-| IAM login and role boundaries | Unit/handler coverage and deployment docs. | Add external IAM and bundled ZITADEL E2E checks for admin/modeler/client/flex-role behavior. |
+| IAM login and role boundaries | Unit/handler coverage and deployment docs. | Add external OIDC (Keycloak) E2E checks for `artificialflowadmin`/`artificialflowbusiness`/`artificialflowclient`/`artificialflowanalytics` behavior and the `IAM_DEPLOYMENT_MODE=false` console login. |
 | Node SDK workflow and worker use | SDK mocked tests and live smoke example. | Add versioned contract fixtures and release-smoke SDK examples. |
 | Release candidate smoke | `make release-dry-run`, release workflows. | Add RC readiness summary that includes artifacts, known limitations, and upgrade notes. |
 
@@ -104,7 +104,7 @@ Compatibility-sensitive changes require additional care:
 
 - Worker REST API: run `make worker-conformance` and update `docs/worker-api.md` when behavior changes.
 - Node.js SDK: run SDK tests, package validation, and `npm pack --dry-run`.
-- Docker env vars and Compose profiles: run `make smoke-profiles` and `make smoke-release-profiles`.
+- Docker env vars and Compose profiles: run `make smoke` and `make smoke-release`.
 - Helm values: run `make validate-helm` and document migration notes for renamed or removed values.
 - IAM roles and claims: run auth tests and update `docs/iam.md` if behavior changes.
 - BPMN semantics: run `make test-bpmn-matrix` and update `docs/BPMN_SUPPORT_MATRIX.md` for support changes.
@@ -120,7 +120,7 @@ Agents should prefer targeted regression tests for narrow changes:
 | `backend/libs/auth` | Targeted auth tests plus relevant HTTP authorization tests. | Token validation, claims, roles, or external IAM behavior changes. |
 | `frontend/` | `npm --prefix frontend run lint`, `npm --prefix frontend test`, `npm --prefix frontend run build`. | Routed UI, auth, modeler, or API-facing behavior changes. |
 | `clients/nodejs-sdk/` | `npm --prefix clients/nodejs-sdk test`, package validation, `npm pack --dry-run`. | Public API, auth, worker behavior, or release packaging changes. |
-| `.github/`, `scripts/`, Docker, Helm | `make smoke-profiles`, `make validate-helm`, shell syntax checks. | Release, security, image, or deploy behavior changes. |
+| `.github/`, `scripts/`, Docker, Helm | `make smoke`, `make validate-helm`, shell syntax checks. | Release, security, image, or deploy behavior changes. |
 
 ## Test Evidence Expectations
 
@@ -151,8 +151,8 @@ Use these defaults when planning validation:
 High-priority gaps:
 
 - Browser E2E for modeler deploy, dashboard, processes, instances, task/job completion, and error states.
-- IAM E2E for bundled ZITADEL and external IAM token flows, including admin/modeler/client/flex-role boundaries.
-- CQRS failure-mode tests for Kafka, Debezium Connect, Elasticsearch/OpenSearch, replay, lag, duplicate events, and schema changes.
+- IAM E2E for external OIDC login and client_credentials token flows, including admin/business/client/analytics role boundaries.
+- CQRS failure-mode tests for Kafka, Debezium Connect, Elasticsearch, replay, lag, duplicate events, and schema changes.
 - Worker conformance expansion with real jobs and negative mutation cases.
 - Frontend component tests for pages, forms, loading, empty, sync-lag, and error states.
 

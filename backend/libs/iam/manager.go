@@ -12,28 +12,13 @@ type FrontendAuthConfig struct {
 }
 
 func ResolveFrontendAuthConfigFromEnv() FrontendAuthConfig {
-	authority := strings.TrimSpace(firstNonEmpty(os.Getenv("FRONTEND_AUTH_OIDC_AUTHORITY"), os.Getenv("VITE_OIDC_AUTHORITY")))
-	clientID := strings.TrimSpace(firstNonEmpty(os.Getenv("FRONTEND_AUTH_OIDC_CLIENT_ID"), os.Getenv("VITE_OIDC_CLIENT_ID")))
-	if clientID == "" {
-		clientID = readFrontendClientIDFile(os.Getenv("FRONTEND_AUTH_OIDC_CLIENT_ID_FILE"))
-	}
+	authority := strings.TrimSpace(os.Getenv("FRONTEND_AUTH_OIDC_AUTHORITY"))
+	clientID := strings.TrimSpace(os.Getenv("FRONTEND_AUTH_OIDC_CLIENT_ID"))
 	return FrontendAuthConfig{
 		Enabled:       authority != "" && clientID != "",
 		OIDCAuthority: authority,
 		OIDCClientID:  clientID,
 	}
-}
-
-func readFrontendClientIDFile(path string) string {
-	trimmedPath := strings.TrimSpace(path)
-	if trimmedPath == "" {
-		return ""
-	}
-	content, err := readTrustedConfigFile(trimmedPath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(content))
 }
 
 func firstNonEmpty(values ...string) string {

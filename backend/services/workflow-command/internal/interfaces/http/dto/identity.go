@@ -1,8 +1,7 @@
 package dto
 
 type IdentityConfigResponse struct {
-	DeploymentMode          string   `json:"deployment_mode"`
-	ConfigurationSource     string   `json:"configuration_source"`
+	DeploymentMode          bool     `json:"deployment_mode"`
 	ProviderName            string   `json:"provider_name"`
 	AuthEnabled             bool     `json:"auth_enabled"`
 	FrontendAuthEnabled     bool     `json:"frontend_auth_enabled"`
@@ -19,7 +18,6 @@ type IdentityConfigResponse struct {
 	AllowInsecureIssuer     bool     `json:"allow_insecure_issuer"`
 	ClaimSubjectPath        string   `json:"claim_subject_path"`
 	ClaimRolesPath          string   `json:"claim_roles_path"`
-	ClaimScopesPath         string   `json:"claim_scopes_path"`
 	ClaimTenantPath         string   `json:"claim_tenant_path"`
 	ClaimEmailPath          string   `json:"claim_email_path"`
 	ClaimNamePath           string   `json:"claim_name_path"`

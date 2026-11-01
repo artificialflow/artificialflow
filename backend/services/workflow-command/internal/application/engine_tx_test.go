@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	pb "github.com/artificialflow/artificialflow/backend/api/v1/go"
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/domain/repository"
+	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/infrastructure/messaging"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ type txOnlyRepo struct {
 	processGets      int
 	stateGets        int
 	typeQueries      [][]string
+	outboxCountCalls int
 }
 
 func (r *txOnlyRepo) WithTx(_ context.Context, fn func(txRepo repository.Repository) error) error {
@@ -63,18 +66,19 @@ func (r *txOnlyRepo) ListPendingOutboxMessages(_ context.Context, now time.Time,
 	return out, nil
 }
 
-func (r *txOnlyRepo) ClaimOutboxMessage(_ context.Context, id string, claimedAt time.Time) (bool, error) {
+func (r *txOnlyRepo) ClaimOutboxMessage(_ context.Context, id, owner string, ttl time.Duration) (*model.OutboxMessage, error) {
 	msg, ok := r.outbox[id]
 	if !ok {
-		return false, nil
+		return nil, nil
 	}
+	claimedAt := time.Now()
 	staleBefore := claimedAt.Add(-5 * time.Minute)
 	pendingDue := msg.Status == "PENDING" && (msg.NextAttempt == nil || !msg.NextAttempt.After(claimedAt))
 	staleProcessing := msg.Status == "PROCESSING" &&
 		((msg.ProcessingStartedAt != nil && !msg.ProcessingStartedAt.After(staleBefore)) ||
 			(msg.ProcessingStartedAt == nil && !msg.CreatedAt.After(staleBefore)))
 	if !pendingDue && !staleProcessing {
-		return false, nil
+		return nil, nil
 	}
 	processingStartedAt := claimedAt
 	msg.Status = "PROCESSING"
@@ -82,50 +86,97 @@ func (r *txOnlyRepo) ClaimOutboxMessage(_ context.Context, id string, claimedAt 
 	msg.LastError = ""
 	msg.NextAttempt = nil
 	msg.ProcessingStartedAt = &processingStartedAt
+	msg.ClaimOwner = owner
+	expiresAt := claimedAt.Add(ttl)
+	msg.ClaimExpiresAt = &expiresAt
+	msg.ClaimGeneration++
 	r.outbox[id] = msg
-	return true, nil
+	return &msg, nil
 }
 
-func (r *txOnlyRepo) MarkOutboxMessagePublishFailed(_ context.Context, id, lastError string, nextAttempt time.Time) error {
-	msg, ok := r.outbox[id]
-	if !ok {
-		return nil
+func (r *txOnlyRepo) ClaimOutboxMessages(ctx context.Context, owner string, ttl time.Duration, limit int) ([]model.OutboxMessage, error) {
+	messages, err := r.ListPendingOutboxMessages(ctx, time.Now(), limit)
+	if err != nil {
+		return nil, err
 	}
+	claimed := make([]model.OutboxMessage, 0, len(messages))
+	for _, message := range messages {
+		item, claimErr := r.ClaimOutboxMessage(ctx, message.ID, owner, ttl)
+		if claimErr != nil {
+			return nil, claimErr
+		}
+		if item != nil {
+			claimed = append(claimed, *item)
+		}
+	}
+	return claimed, nil
+}
+
+func (r *txOnlyRepo) MarkOutboxMessagePublishFailed(
+	_ context.Context, id, owner string, generation int64, lastError string, retryDelay time.Duration,
+) error {
+	msg, ok := r.outbox[id]
+	if !ok || msg.ClaimOwner != owner || msg.ClaimGeneration != generation {
+		return repository.ErrLeaseLost
+	}
+	nextAttempt := time.Now().Add(retryDelay)
 	msg.Status = "PENDING"
 	msg.LastError = lastError
 	msg.NextAttempt = &nextAttempt
 	msg.ProcessingStartedAt = nil
+	msg.ClaimOwner = ""
+	msg.ClaimExpiresAt = nil
 	r.outbox[id] = msg
 	return nil
 }
 
-func (r *txOnlyRepo) MarkOutboxMessageTerminalFailed(_ context.Context, id, lastError string, failedAt time.Time) error {
+func (r *txOnlyRepo) MarkOutboxMessageTerminalFailed(
+	_ context.Context, id, owner string, generation int64, lastError string,
+) error {
 	msg, ok := r.outbox[id]
-	if !ok {
-		return nil
+	if !ok || msg.ClaimOwner != owner || msg.ClaimGeneration != generation {
+		return repository.ErrLeaseLost
 	}
+	failedAt := time.Now()
 	msg.Status = "FAILED"
 	msg.LastError = lastError
 	msg.NextAttempt = nil
 	msg.ProcessingStartedAt = nil
 	msg.PublishedAt = &failedAt
+	msg.ClaimOwner = ""
+	msg.ClaimExpiresAt = nil
 	r.outbox[id] = msg
 	return nil
 }
 
-func (r *txOnlyRepo) MarkOutboxMessagePublished(_ context.Context, id string, publishedAt time.Time) error {
+func (r *txOnlyRepo) MarkOutboxMessagePublished(_ context.Context, id, owner string, generation int64) error {
 	msg, ok := r.outbox[id]
-	if !ok {
-		return nil
+	if !ok || msg.ClaimOwner != owner || msg.ClaimGeneration != generation {
+		return repository.ErrLeaseLost
 	}
+	publishedAt := time.Now()
 	msg.Status = "PUBLISHED"
 	msg.ProcessingStartedAt = nil
 	msg.PublishedAt = &publishedAt
+	msg.ClaimOwner = ""
+	msg.ClaimExpiresAt = nil
 	r.outbox[id] = msg
+	return nil
+}
+
+func (r *txOnlyRepo) MarkOutboxMessagesPublished(
+	ctx context.Context, owner string, messages []model.OutboxMessage,
+) error {
+	for _, message := range messages {
+		if err := r.MarkOutboxMessagePublished(ctx, message.ID, owner, message.ClaimGeneration); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (r *txOnlyRepo) CountPendingOutboxMessages(_ context.Context, now time.Time) (int64, error) {
+	r.outboxCountCalls++
 	var count int64
 	staleBefore := now.Add(-5 * time.Minute)
 	for _, msg := range r.outbox {
@@ -139,6 +190,26 @@ func (r *txOnlyRepo) CountPendingOutboxMessages(_ context.Context, now time.Time
 		count++
 	}
 	return count, nil
+}
+
+func (r *txOnlyRepo) DeletePublishedOutboxMessagesBefore(
+	_ context.Context, cutoff time.Time, limit int,
+) (int64, error) {
+	if limit <= 0 {
+		limit = len(r.outbox)
+	}
+	var deleted int64
+	for id, msg := range r.outbox {
+		if msg.Status != "PUBLISHED" || msg.PublishedAt == nil || !msg.PublishedAt.Before(cutoff) {
+			continue
+		}
+		delete(r.outbox, id)
+		deleted++
+		if int(deleted) >= limit {
+			break
+		}
+	}
+	return deleted, nil
 }
 
 func (r *txOnlyRepo) GetIdempotencyRecord(_ context.Context, key, operation string) (*model.IdempotencyRecord, error) {
@@ -323,6 +394,21 @@ func (p *failingPublisher) Close() error {
 	return nil
 }
 
+type envelopeCapturePublisher struct {
+	envelopes []messaging.EventEnvelope
+}
+
+func (p *envelopeCapturePublisher) Publish(_ context.Context, _ proto.Message, _ string) error {
+	return nil
+}
+
+func (p *envelopeCapturePublisher) PublishEnvelope(_ context.Context, _ proto.Message, envelope messaging.EventEnvelope) error {
+	p.envelopes = append(p.envelopes, envelope)
+	return nil
+}
+
+func (p *envelopeCapturePublisher) Close() error { return nil }
+
 func testJSONValue(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)
@@ -334,6 +420,37 @@ func testJSONValue(t *testing.T, value any) []byte {
 
 func ptrTime(value time.Time) *time.Time {
 	return &value
+}
+
+func TestOutboxRetryReusesImmutableEventEnvelope(t *testing.T) {
+	repo := &txOnlyRepo{outbox: map[string]model.OutboxMessage{}}
+	publisher := &envelopeCapturePublisher{}
+	engine := NewEngine(repo, publisher)
+	ctx := auth.WithPrincipal(context.Background(), auth.Principal{TenantID: "tenant-a"})
+	event := &pb.ProcessInstanceCreated{Key: 991}
+	persisted, err := engine.persistBufferedEventsToOutbox(ctx, repo, []bufferedEvent{{
+		ctx: ctx, event: event, eventType: "ProcessInstanceCreated",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 {
+		t.Fatal("expected persisted event")
+	}
+	if err := engine.publishEnvelope(ctx, event, persisted[0].envelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.publishEnvelope(ctx, event, persisted[0].envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.envelopes) != 2 {
+		t.Fatalf("envelopes=%d", len(publisher.envelopes))
+	}
+	first, retry := publisher.envelopes[0], publisher.envelopes[1]
+	if first.EventID == "" || first.EventID != retry.EventID || first.TenantID != "tenant-a" ||
+		first.AggregateID != retry.AggregateID || !first.OccurredAt.Equal(retry.OccurredAt) {
+		t.Fatalf("retry changed immutable envelope: first=%#v retry=%#v", first, retry)
+	}
 }
 
 func TestWithTxFlushesBufferedEventsAfterCommit(t *testing.T) {
@@ -356,6 +473,26 @@ func TestWithTxFlushesBufferedEventsAfterCommit(t *testing.T) {
 	}
 	if publisher.events[0] != "ProcessInstanceCreated" {
 		t.Fatalf("expected ProcessInstanceCreated event, got %q", publisher.events[0])
+	}
+}
+
+func TestWithTxCanDeferBufferedEventsToRelay(t *testing.T) {
+	repo := &txOnlyRepo{}
+	publisher := &capturedPublisher{}
+	engine := NewEngine(repo, publisher)
+	engine.SetFlushOutboxAfterCommit(false)
+
+	err := engine.withTx(context.Background(), func(txEngine *Engine) error {
+		return txEngine.eventPublisher.Publish(context.Background(), &pb.ProcessInstanceCreated{}, "ProcessInstanceCreated")
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatalf("expected delivery to be deferred, got %d published events", len(publisher.events))
+	}
+	if len(repo.outbox) != 1 {
+		t.Fatalf("expected one durable outbox event, got %d", len(repo.outbox))
 	}
 }
 
@@ -456,6 +593,68 @@ func TestRunOutboxRelayCyclePublishesClaimedMessages(t *testing.T) {
 	}
 	if snapshot.OutboxPublishLagSec == 0 {
 		t.Fatalf("expected outbox publish lag metric to be set")
+	}
+}
+
+func TestRunOutboxRelayCycleCachesPendingCountWithoutBlockingClaims(t *testing.T) {
+	repo := &txOnlyRepo{outbox: map[string]model.OutboxMessage{}}
+	engine := NewEngine(repo, &capturedPublisher{})
+	payload, err := proto.Marshal(&pb.JobActivated{Key: 102})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.outbox["msg-cache-1"] = model.OutboxMessage{
+		ID: "msg-cache-1", EventType: "JobActivated", Payload: payload,
+		Status: "PENDING", CreatedAt: time.Now().Add(-time.Second),
+	}
+	first, err := engine.RunOutboxRelayCycle(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.outbox["msg-cache-2"] = model.OutboxMessage{
+		ID: "msg-cache-2", EventType: "JobActivated", Payload: payload,
+		Status: "PENDING", CreatedAt: time.Now(),
+	}
+	second, err := engine.RunOutboxRelayCycle(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.outboxCountCalls != 1 {
+		t.Fatalf("pending count calls = %d, want 1 within refresh interval", repo.outboxCountCalls)
+	}
+	if first.Pending != 1 || second.Pending != first.Pending {
+		t.Fatalf("pending results = %d then %d, want cached exact result", first.Pending, second.Pending)
+	}
+	if second.Claimed != 1 || second.Published != 1 {
+		t.Fatalf("cached count prevented relay progress: %+v", second)
+	}
+}
+
+func TestRunOutboxCleanupDeletesOnlyRetainedPublishedMessages(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-time.Hour)
+	recent := now.Add(-time.Minute)
+	repo := &txOnlyRepo{outbox: map[string]model.OutboxMessage{
+		"old":    {ID: "old", Status: "PUBLISHED", PublishedAt: &old},
+		"recent": {ID: "recent", Status: "PUBLISHED", PublishedAt: &recent},
+		"failed": {ID: "failed", Status: "FAILED", PublishedAt: &old},
+	}}
+	engine := NewEngine(repo, &capturedPublisher{})
+	result, err := engine.RunOutboxCleanup(context.Background(), 30*time.Minute, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Deleted != 1 || result.Cutoff.IsZero() {
+		t.Fatalf("unexpected cleanup result: %+v", result)
+	}
+	if _, exists := repo.outbox["old"]; exists {
+		t.Fatal("old published message was not deleted")
+	}
+	if _, exists := repo.outbox["recent"]; !exists {
+		t.Fatal("recent published message was deleted")
+	}
+	if _, exists := repo.outbox["failed"]; !exists {
+		t.Fatal("non-published message was deleted")
 	}
 }
 
@@ -770,6 +969,64 @@ func TestRunOutboxRelayCycleSchedulesRetryOnFailure(t *testing.T) {
 	snapshot := engine.MetricsSnapshot()
 	if snapshot.OutboxPublishFailure == 0 {
 		t.Fatalf("expected outbox failure metric to increment")
+	}
+}
+
+type batchPublisher struct {
+	calls   int
+	failIDs map[string]bool
+}
+
+func (p *batchPublisher) Publish(_ context.Context, _ proto.Message, _ string) error {
+	return errors.New("single publish must not be used")
+}
+
+func (p *batchPublisher) PublishEnvelopes(_ context.Context, messages []messaging.EnvelopeMessage) []error {
+	p.calls++
+	errs := make([]error, len(messages))
+	for i, m := range messages {
+		if p.failIDs[m.Envelope.EventID] {
+			errs[i] = errors.New("broker rejected")
+		}
+	}
+	return errs
+}
+
+func (p *batchPublisher) Close() error { return nil }
+
+func TestRunOutboxRelayCyclePublishesClaimedMessagesInOneBatch(t *testing.T) {
+	repo := &txOnlyRepo{outbox: map[string]model.OutboxMessage{}}
+	publisher := &batchPublisher{failIDs: map[string]bool{"msg-b": true}}
+	engine := NewEngine(repo, publisher)
+
+	for i, msgID := range []string{"msg-a", "msg-b", "msg-c"} {
+		payload, err := proto.Marshal(&pb.JobActivated{Key: int64(200 + i)})
+		if err != nil {
+			t.Fatalf("failed to marshal test payload: %v", err)
+		}
+		repo.outbox[msgID] = model.OutboxMessage{
+			ID: msgID, EventType: "JobActivated", Payload: payload,
+			Status: "PENDING", CreatedAt: time.Now().Add(-time.Second),
+		}
+	}
+
+	result, err := engine.RunOutboxRelayCycle(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("relay cycle failed: %v", err)
+	}
+	if publisher.calls != 1 {
+		t.Fatalf("expected one batch publish call, got %d", publisher.calls)
+	}
+	if result.Claimed != 3 || result.Published != 2 || result.Failed != 1 {
+		t.Fatalf("unexpected relay result: %+v", result)
+	}
+	if got := repo.outbox["msg-b"].Status; got != "PENDING" {
+		t.Fatalf("rejected message status = %s, want PENDING", got)
+	}
+	for _, msgID := range []string{"msg-a", "msg-c"} {
+		if got := repo.outbox[msgID].Status; got != "PUBLISHED" {
+			t.Fatalf("%s status = %s, want PUBLISHED", msgID, got)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/domain/bpmn"
 	"time"
@@ -62,7 +63,7 @@ func (e *Engine) deployWorkflow(ctx context.Context, name string, steps []model.
 		DeploymentKey:    generateKey(generateRuntimeID()),
 		Resource:         stepsJSON, // Store JSON in Resource for programmatic
 		ResourceChecksum: checksum,
-		TenantID:         "default",
+		TenantID:         auth.TenantIDFromContext(ctx),
 		CreatedAt:        time.Now(),
 	}
 
@@ -112,7 +113,7 @@ func (e *Engine) deployWorkflowFromBPMN(ctx context.Context, xmlData []byte) (*m
 		DeploymentKey:    generateKey(generateRuntimeID()),
 		Resource:         xmlData,
 		ResourceChecksum: checksum,
-		TenantID:         "default",
+		TenantID:         auth.TenantIDFromContext(ctx),
 		CreatedAt:        time.Now(),
 	}
 

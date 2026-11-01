@@ -23,7 +23,15 @@ func newJWTVerifier(ctx context.Context, cfg Config, log *logger.Logger) (TokenV
 		return nil, fmt.Errorf("AUTH_ISSUER_INTERNAL_URL is required for jwt token mode")
 	}
 
-	initCtx := ctx
+	httpTimeout := cfg.HTTPTimeout
+	if httpTimeout <= 0 {
+		httpTimeout = 10 * time.Second
+	}
+	allowedAlgorithms := cfg.AllowedAlgorithms
+	if len(allowedAlgorithms) == 0 {
+		allowedAlgorithms = []string{"RS256"}
+	}
+	initCtx := oidc.ClientContext(ctx, &http.Client{Timeout: httpTimeout})
 	discoveryIssuer := cfg.InternalIssuerURL
 	if cfg.AllowInsecureIssuer && cfg.InternalIssuerURL != cfg.ExternalIssuerURL && cfg.ExternalIssuerURL != "" {
 		log.Warn(ctx, "insecure issuer URL mode enabled", map[string]any{
@@ -35,6 +43,7 @@ func newJWTVerifier(ctx context.Context, cfg Config, log *logger.Logger) (TokenV
 		if err != nil {
 			return nil, err
 		}
+		rewriteClient.Timeout = httpTimeout
 		initCtx = oidc.ClientContext(ctx, rewriteClient)
 	}
 
@@ -58,8 +67,9 @@ func newJWTVerifier(ctx context.Context, cfg Config, log *logger.Logger) (TokenV
 
 	return &jwtVerifier{
 		verifier: provider.VerifierContext(initCtx, &oidc.Config{
-			ClientID:          cfg.ClientID,
-			SkipClientIDCheck: !cfg.EnforceAudience,
+			ClientID:             cfg.ClientID,
+			SkipClientIDCheck:    !cfg.EnforceAudience,
+			SupportedSigningAlgs: append([]string(nil), allowedAlgorithms...),
 		}),
 		config: cfg,
 	}, nil

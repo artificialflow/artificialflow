@@ -33,6 +33,15 @@ func (m *Middleware) UnaryServerInterceptor(roles ...string) grpc.UnaryServerInt
 		if err != nil {
 			return nil, status.Error(codes.Unauthenticated, "invalid token")
 		}
+		if err := resolvePrincipalTenant(principal); err != nil {
+			return nil, status.Error(codes.Unauthenticated, "tenant claim required")
+		}
+		if md, ok := metadata.FromIncomingContext(ctx); ok {
+			requested := md.Get("x-tenant-id")
+			if len(requested) > 0 && requested[0] != "" && requested[0] != principal.TenantID {
+				return nil, status.Error(codes.InvalidArgument, "tenant conflict")
+			}
+		}
 		if !principal.HasAnyRole(roles...) {
 			return nil, status.Error(codes.PermissionDenied, "forbidden")
 		}

@@ -7,25 +7,6 @@ export interface JsonArray extends Array<JsonValue> {}
 
 export type TokenProvider = string | (() => string | Promise<string>);
 
-export interface ZitadelJwtProfile {
-    type: 'serviceaccount';
-    keyId: string;
-    key: string;
-    userId: string;
-    issuer: string;
-    tokenUrl: string;
-    scopes: string[];
-}
-
-export interface ZitadelJwtProfileAuthOptions {
-    type: 'zitadel-jwt-profile';
-    profile: ZitadelJwtProfile;
-    refreshSkewMs?: number;
-    assertionTtlMs?: number;
-    clock?: () => number;
-    fetch?: FetchLike;
-}
-
 export interface OAuthClientCredentialsProfile {
     type: 'oauth-client-credentials';
     tokenUrl: string;
@@ -42,9 +23,7 @@ export interface OAuthClientCredentialsAuthOptions {
     fetch?: FetchLike;
 }
 
-export type ArtificialFlowAuthOptions =
-    | ZitadelJwtProfileAuthOptions
-    | OAuthClientCredentialsAuthOptions;
+export type ArtificialFlowAuthOptions = OAuthClientCredentialsAuthOptions;
 
 export interface ArtificialFlowClientBaseOptions {
     baseUrl?: string;
@@ -65,14 +44,6 @@ export interface RequestOptions {
     idempotencyKey?: string;
     headers?: Record<string, string>;
     signal?: AbortSignal;
-}
-
-export interface ActingUser {
-    subject?: string;
-    username?: string;
-    email?: string;
-    name?: string;
-    roles?: string[];
 }
 
 export interface FetchResponseLike {
@@ -111,6 +82,33 @@ export interface WorkflowDefinition {
     steps?: unknown[];
 }
 
+export interface DecisionDefinition {
+    key: string;
+    decision_id: string;
+    name: string;
+    version: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface Incident {
+    key: string;
+    id: string;
+    processInstanceKey: string;
+    elementInstanceKey: string;
+    jobKey?: string;
+    errorType: string;
+    errorMessage: string;
+    state: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface ListIncidentsOptions {
+    processInstanceKey?: string | number;
+    limit?: number;
+}
+
 export interface WorkflowSearchResponse {
     workflows: WorkflowDefinition[];
     total: number;
@@ -138,6 +136,8 @@ export interface WorkflowInstance {
 
 export interface UserTask {
     key: string;
+    processInstanceKey: string;
+    processDefinitionKey: string;
     elementId: string;
     executionId: string;
     state: string;
@@ -145,7 +145,9 @@ export interface UserTask {
     candidateUsers?: string[];
     candidateGroups?: string[];
     claimedBy?: string;
+    /** Open and unclaimed. */
     canClaim: boolean;
+    /** Open and claimed. */
     canComplete: boolean;
     dueDate?: string;
     createdAt: string;
@@ -175,19 +177,17 @@ export interface GetInstanceOptions extends RequestOptions {
     source?: 'command' | 'query';
 }
 
-export interface InboxRequestOptions extends RequestOptions {
-    actingUser: ActingUser;
-}
-
-export interface GetInboxInstanceOptions extends InboxRequestOptions {
-    includeCompleted?: boolean;
-}
-
-export interface ListUserTasksOptions extends InboxRequestOptions {
-    includeCompleted?: boolean;
-}
-
-export interface ListMyCompletedTransactionsOptions extends InboxRequestOptions {
+export interface SearchTasksOptions {
+    /** Tasks assigned to or claimed by this user. */
+    assignee?: string;
+    /** Tasks this user may act on: assignee, claim owner or candidate user. */
+    candidateUser?: string;
+    /** Tasks offered to any of these groups. */
+    candidateGroups?: string[];
+    /** Also return open tasks with no assignee, candidates or claim. */
+    includeUnassigned?: boolean;
+    processInstanceKey?: string | number;
+    state?: 'active' | 'completed' | 'all';
     limit?: number;
 }
 
@@ -202,6 +202,24 @@ export interface UpdateVariablesRequest {
 
 export interface CompleteTaskRequest {
     step_id?: string;
+}
+
+export interface InstanceMigrationRequest {
+    sourceDefinitionKey: string;
+    targetDefinitionKey: string;
+    elementMapping: Record<string, string>;
+    operationId?: string;
+}
+
+export interface InstanceMigrationResult {
+    operationId: string;
+    instanceKey: string;
+    dryRun: boolean;
+    status: 'VALIDATED' | 'APPLIED' | 'REJECTED';
+    reasonCode?: string;
+    message?: string;
+    sourceVersion?: number;
+    targetVersion?: number;
 }
 
 export interface PublishSignalRequest {
@@ -286,7 +304,6 @@ export interface IdentityPrincipal {
     name?: string;
     tenant_id?: string;
     roles?: string[];
-    scopes?: string[];
     token_mode?: string;
     claims?: Record<string, unknown>;
 }
@@ -297,8 +314,8 @@ export interface IdentityResponse {
 }
 
 export interface IdentityConfigResponse {
-    deployment_mode: string;
-    configuration_source: string;
+    /** IAM_DEPLOYMENT_MODE: true = external OIDC provider, false = no IAM provider. */
+    deployment_mode: boolean;
     provider_name: string;
     auth_enabled: boolean;
     frontend_auth_enabled: boolean;
@@ -315,113 +332,8 @@ export interface IdentityConfigResponse {
     allow_insecure_issuer: boolean;
     claim_subject_path: string;
     claim_roles_path: string;
-    claim_scopes_path: string;
     claim_tenant_path: string;
     claim_email_path: string;
     claim_name_path: string;
     standard_roles: string[];
-}
-
-export interface IdentityManagementUser {
-    id: string;
-    username: string;
-    preferred_login_name: string;
-    display_name: string;
-    given_name: string;
-    family_name: string;
-    email: string;
-    email_verified: boolean;
-    state: string;
-    type: string;
-    created_at: string;
-    changed_at: string;
-    roles: string[];
-}
-
-export interface IdentityManagementRole {
-    key: string;
-    display_name: string;
-    group: string;
-}
-
-export interface IdentityManagementClientToken {
-    client_id: string;
-    username: string;
-    name: string;
-    description: string;
-    environment: string;
-    owner_email: string;
-    purpose: string;
-    role: string;
-    token_id: string;
-    token: string;
-    token_created_at: string;
-    token_expires_at: string;
-}
-
-export interface IdentityManagementClientTokenSummary {
-    token_id: string;
-    token_created_at: string;
-    token_changed_at: string;
-    token_expires_at: string;
-    status: string;
-}
-
-export interface IdentityManagementClient {
-    client_id: string;
-    username: string;
-    name: string;
-    description: string;
-    environment: string;
-    owner_email: string;
-    purpose: string;
-    role: string;
-    state: string;
-    created_at: string;
-    changed_at: string;
-    tokens: IdentityManagementClientTokenSummary[];
-}
-
-export interface CreateIdentityManagementClientTokenRequest {
-    username?: string;
-    name: string;
-    description?: string;
-    environment?: string;
-    owner_email?: string;
-    purpose?: string;
-    token_expires_at?: string;
-}
-
-export interface RotateIdentityManagementClientTokenRequest {
-    token_expires_at?: string;
-}
-
-export interface CreateIdentityManagementUserRequest {
-    username?: string;
-    given_name: string;
-    family_name: string;
-    email: string;
-    password: string;
-    password_change_required?: boolean;
-    roles?: string[];
-}
-
-export interface UpdateIdentityManagementUserRequest {
-    username?: string;
-    given_name?: string;
-    family_name?: string;
-    display_name?: string;
-    email?: string;
-    roles?: string[];
-}
-
-export interface CreateIdentityManagementRoleRequest {
-    key: string;
-    display_name: string;
-    group?: string;
-}
-
-export interface UpdateIdentityManagementRoleRequest {
-    display_name: string;
-    group?: string;
 }

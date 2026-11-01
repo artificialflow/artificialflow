@@ -1,14 +1,13 @@
 apiVersion: v2
 name: artificialflow
-description: Production Helm chart for ArtificialFlow with external OIDC or bundled ZITADEL IAM
+description: Production Helm chart for ArtificialFlow with external OIDC
 type: application
-version: 1.1.0
-appVersion: "1.1.0"
+version: 1.2.0
+appVersion: "1.2.0"
 keywords:
   - artificialflow
   - workflow-engine
   - bpmn
   - oidc
-  - zitadel
 maintainers:
   - name: ArtificialFlow

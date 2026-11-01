@@ -28,7 +28,6 @@ while IFS= read -r script; do
 done < <(git ls-files 'scripts/*.sh' 'scripts/**/*.sh')
 
 run actionlint -color=false
-run node --test scripts/bootstrap_zitadel.test.mjs
 run bash scripts/cqrs_parity_check.test.sh
 run bash scripts/validate_gateway_cors.sh
 run bash scripts/test_persistent_migrations.sh
@@ -37,9 +36,10 @@ run go test ./backend/api/v1/go -run 'TestCanonicalJobWorkerServicePath|TestProt
 run go test ./backend/services/workflow-command/internal/domain/bpmn -run 'TestParse_ArtificialFlowNamespaceCompatibilityAndPrecedence|TestParse_CanonicalizesExtensionPropertyAliases' -count=1
 run go test ./backend/services/workflow-command/tests -run 'TestDeployAndExecuteCanonicalArtificialFlowBPMNAttributes|TestDeployWorkflowFromBPMN_ServiceTaskExtensionPropertyMapsImplementation|TestDeployWorkflowFromBPMN_UserTaskAssignmentFromExtensionProperties' -count=1
 run go test ./backend/libs/auth -run 'TestCanonicalizeRolesNormalizesStandardRolesAndPreservesCustomRoles|TestPrincipalFromClaims_CanonicalizesMixedStandardRoleClaims|TestUnaryServerInterceptor' -count=1
-run go test ./backend/libs/iam -run 'TestResolveZITADELManagementConfigUsesCanonicalEnvironment|TestClientDescriptionUsesCanonicalPrefixAndReadsBothPrefixes|TestNormalizeRoleKeysCanonicalizesPlatformRoles' -count=1
-run go test ./backend/services/workflow-command/internal/interfaces/http -run 'TestActingPrincipalFromRequestReadsCanonicalHeaders|TestActingPrincipalFromRequestFallsBackToUsername|TestIdentityManagementProtectsArtificialFlowPlatformRoles' -count=1
-run go test ./backend/services/workflow-command/internal/infrastructure/persistence -run 'TestUserTaskQueriesIncludeCanonicalAndLegacyTypes' -count=1
+run go test ./backend/libs/iam -count=1
+run go test ./backend/services/workflow-command/internal/interfaces/http -run 'TestRoleMatrix|TestClientTaskSearchClaimAndComplete|TestAdminClaimDefaultsToOwnIdentityAndCanReassign' -count=1
+run go test ./backend/services/workflow-command/internal/infrastructure/persistence -run 'TestUserTaskQueriesIncludeCanonicalAndLegacyTypes|TestSearchUserTaskJobs' -count=1
+run go test ./backend/services/workflow-command/internal/infrastructure/migration -count=1
 run go test ./backend/services/workflow-query/internal/infrastructure/persistence -run 'TestNewESRepositoryDefaultsToCanonicalPrefix|TestESRepository' -count=1
 run go test ./backend/libs/metrics -run 'TestOutboxCollectorExposesCanonicalMetrics' -count=1
 run go test ./backend/services/sync-worker/cmd -run 'TestEnsureConnectorBootstrap|TestBuildConnectorCreateRequest|TestConflictingConnectorNames' -count=1
@@ -58,15 +58,8 @@ run npm --prefix clients/nodejs-sdk test
 run bash scripts/validate_nodejs_sdk_install.sh
 run bash scripts/validate_generated_proto.sh
 
-run docker compose -f docker-compose.yml config --quiet
-run docker compose -f docker-compose.external-iam.yml config --quiet
-run docker compose -f docker-compose.zitadel.yml config --quiet
-run docker compose -f docker-compose.yml -f docker-compose.release.yml config --quiet
-run docker compose -f docker-compose.external-iam.yml -f docker-compose.release.yml config --quiet
-run docker compose -f docker-compose.zitadel.yml -f docker-compose.release.yml config --quiet
+run docker compose --env-file /dev/null config --quiet
 run bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.yml
-run bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.external-iam.yml
-run bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.zitadel.yml
 run bash scripts/validate_compose_identities.sh
 run bash scripts/validate_helm.sh
 

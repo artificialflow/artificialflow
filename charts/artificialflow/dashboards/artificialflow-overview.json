@@ -1,0 +1,85 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "title": "Command request rate",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(artificialflow_http_requests_total{service=\"workflow-command\"}[5m]))"}],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}
+    },
+    {
+      "title": "API 5xx ratio",
+      "type": "timeseries",
+      "targets": [{"expr": "sum by (service) (rate(artificialflow_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum by (service) (rate(artificialflow_http_requests_total[5m])), 0.001)"}],
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}
+    },
+    {
+      "title": "API p95 latency",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (service, le) (rate(artificialflow_http_request_duration_seconds_bucket[5m])))"}],
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}
+    },
+    {
+      "title": "Outbox pending / oldest age",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "artificialflow_outbox_pending", "legendFormat": "pending"},
+        {"expr": "artificialflow_outbox_publish_lag_seconds", "legendFormat": "oldest seconds"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "title": "Outbox retries / dead letters",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "rate(artificialflow_outbox_retries_total[5m])", "legendFormat": "retries/s"},
+        {"expr": "increase(artificialflow_outbox_dead_letters_total[5m])", "legendFormat": "dead letters"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "title": "Projection freshness",
+      "type": "timeseries",
+      "targets": [{"expr": "artificialflow_projection_freshness_seconds"}],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16}
+    },
+    {
+      "title": "Projection retries / dead letters",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "rate(artificialflow_projection_retries_total[5m])"},
+        {"expr": "increase(artificialflow_projection_dead_letters_total[5m])"}
+      ],
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16}
+    },
+    {
+      "title": "Dependency and schema readiness",
+      "type": "state-timeline",
+      "targets": [
+        {"expr": "artificialflow_dependency_ready"},
+        {"expr": "artificialflow_schema_ready"}
+      ],
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16}
+    },
+    {
+      "title": "Runtime failures",
+      "type": "timeseries",
+      "targets": [{"expr": "increase(artificialflow_runtime_failures_total[5m])"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+    },
+    {
+      "title": "Instance migration outcomes",
+      "type": "timeseries",
+      "targets": [{"expr": "increase(artificialflow_instance_migration_outcomes_total[1h])"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["artificialflow", "slo"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "ArtificialFlow Overview",
+  "uid": "artificialflow-overview",
+  "version": 1
+}

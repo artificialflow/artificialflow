@@ -1,9 +1,8 @@
 package auth
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolveConfigFromEnv_PrefersAuthContract(t *testing.T) {
@@ -27,6 +26,42 @@ func TestResolveConfigFromEnv_PrefersAuthContract(t *testing.T) {
 	}
 	if cfg.TokenValidationMode != TokenModeJWT {
 		t.Fatalf("expected jwt mode, got %s", cfg.TokenValidationMode)
+	}
+}
+
+func TestConfigValidateProductionFailsClosed(t *testing.T) {
+	base := Config{
+		InternalIssuerURL:   "https://login.example.com",
+		ExternalIssuerURL:   "https://login.example.com",
+		ClientID:            "workflow-backend",
+		TokenValidationMode: TokenModeJWT,
+		EnforceAudience:     true,
+		Production:          true,
+		AllowedAlgorithms:   []string{"RS256"},
+		HTTPTimeout:         10 * time.Second,
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid production config rejected: %v", err)
+	}
+	tests := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"http issuer", func(c *Config) {
+			c.InternalIssuerURL, c.ExternalIssuerURL = "http://login.example.com", "http://login.example.com"
+		}},
+		{"audience disabled", func(c *Config) { c.EnforceAudience = false }},
+		{"insecure rewrite", func(c *Config) { c.AllowInsecureIssuer = true }},
+		{"algorithm allowlist empty", func(c *Config) { c.AllowedAlgorithms = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			tt.edit(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected invalid production config to fail")
+			}
+		})
 	}
 }
 
@@ -70,110 +105,10 @@ func TestConfigEnabled_IntrospectionRequiresURL(t *testing.T) {
 	}
 }
 
-func TestResolveConfigFromEnv_LoadsIntrospectionCredentialsFromFiles(t *testing.T) {
-	dir := t.TempDir()
-	clientIDFile := filepath.Join(dir, "client-id")
-	secretFile := filepath.Join(dir, "client-secret")
-	if err := os.WriteFile(clientIDFile, []byte("generated-client\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(secretFile, []byte("generated-secret\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_ID", "")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_SECRET", "")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_ID_FILE", clientIDFile)
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_SECRET_FILE", secretFile)
-
-	cfg := ResolveConfigFromEnv()
-	if cfg.IntrospectionClientID != "generated-client" {
-		t.Fatalf("expected file-backed client id, got %q", cfg.IntrospectionClientID)
-	}
-	if cfg.IntrospectionClientSecret != "generated-secret" {
-		t.Fatalf("expected file-backed client secret, got %q", cfg.IntrospectionClientSecret)
-	}
-}
-
-func TestResolveConfigFromEnv_LoadsClientIDFromTrustedFile(t *testing.T) {
-	clientIDFile := filepath.Join(t.TempDir(), "client-id")
-	if err := os.WriteFile(clientIDFile, []byte("generated-project-id\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+func TestResolveConfigFromEnv_ClientIDDefaultsToWorkflowBackend(t *testing.T) {
 	t.Setenv("AUTH_CLIENT_ID", "")
-	t.Setenv("AUTH_CLIENT_ID_FILE", clientIDFile)
-
-	cfg := ResolveConfigFromEnv()
-	if cfg.ClientID != "generated-project-id" {
-		t.Fatalf("expected file-backed client id, got %q", cfg.ClientID)
-	}
-	if cfg.ClientIDFile != clientIDFile {
-		t.Fatalf("expected client id file to be retained, got %q", cfg.ClientIDFile)
-	}
-}
-
-func TestResolveConfigFromEnv_ExplicitClientIDOverridesFile(t *testing.T) {
-	clientIDFile := filepath.Join(t.TempDir(), "client-id")
-	if err := os.WriteFile(clientIDFile, []byte("file-project-id"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AUTH_CLIENT_ID", "explicit-audience")
-	t.Setenv("AUTH_CLIENT_ID_FILE", clientIDFile)
-
-	if cfg := ResolveConfigFromEnv(); cfg.ClientID != "explicit-audience" {
-		t.Fatalf("expected explicit client id to win, got %q", cfg.ClientID)
-	}
-}
-
-func TestResolveConfigFromEnv_ConfiguredInvalidClientIDFileFailsClosed(t *testing.T) {
-	t.Setenv("AUTH_CLIENT_ID", "")
-	t.Setenv("AUTH_CLIENT_ID_FILE", "relative/project-id")
-
-	if cfg := ResolveConfigFromEnv(); cfg.ClientID != "" {
-		t.Fatalf("expected configured invalid client id file to fail closed, got %q", cfg.ClientID)
-	}
-}
-
-func TestResolveConfigFromEnv_ClientIDKeepsExternalDefaultWithoutFile(t *testing.T) {
-	t.Setenv("AUTH_CLIENT_ID", "")
-	t.Setenv("AUTH_CLIENT_ID_FILE", "")
 
 	if cfg := ResolveConfigFromEnv(); cfg.ClientID != "workflow-backend" {
-		t.Fatalf("expected legacy client id default, got %q", cfg.ClientID)
-	}
-}
-
-func TestResolveConfigFromEnv_ExplicitCredentialsOverrideFiles(t *testing.T) {
-	dir := t.TempDir()
-	clientIDFile := filepath.Join(dir, "client-id")
-	secretFile := filepath.Join(dir, "client-secret")
-	if err := os.WriteFile(clientIDFile, []byte("file-client"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(secretFile, []byte("file-secret"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_ID", "env-client")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_SECRET", "env-secret")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_ID_FILE", clientIDFile)
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_SECRET_FILE", secretFile)
-
-	cfg := ResolveConfigFromEnv()
-	if cfg.IntrospectionClientID != "env-client" || cfg.IntrospectionClientSecret != "env-secret" {
-		t.Fatalf("expected explicit credentials to win, got client=%q secret=%q", cfg.IntrospectionClientID, cfg.IntrospectionClientSecret)
-	}
-}
-
-func TestResolveConfigFromEnv_RejectsRelativeOrMissingCredentialFiles(t *testing.T) {
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_ID", "")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_SECRET", "")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_ID_FILE", "relative/client-id")
-	t.Setenv("AUTH_INTROSPECTION_CLIENT_SECRET_FILE", filepath.Join(t.TempDir(), "missing"))
-
-	cfg := ResolveConfigFromEnv()
-	if cfg.IntrospectionClientID != "" {
-		t.Fatalf("expected invalid client id file to fail closed, got %q", cfg.IntrospectionClientID)
-	}
-	if cfg.IntrospectionClientSecret != "" {
-		t.Fatal("expected missing secret file to remain empty")
+		t.Fatalf("expected default client id, got %q", cfg.ClientID)
 	}
 }

@@ -12,18 +12,29 @@ import (
 
 	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	esadapter "github.com/artificialflow/artificialflow/backend/libs/elasticsearch"
+	"github.com/artificialflow/artificialflow/backend/libs/httpproblem"
+	"github.com/artificialflow/artificialflow/backend/libs/iam"
 	"github.com/artificialflow/artificialflow/backend/libs/logger"
+	"github.com/artificialflow/artificialflow/backend/libs/metrics"
+	"github.com/artificialflow/artificialflow/backend/libs/tracing"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-query/internal/application"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-query/internal/infrastructure/persistence"
 	api "github.com/artificialflow/artificialflow/backend/services/workflow-query/internal/interfaces/http"
 
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
 	log := logger.New("workflow-query")
 	ctx := context.Background()
+	tp, err := tracing.InitTracer(ctx, "workflow-query")
+	if err != nil {
+		log.Error(ctx, "failed to initialize tracing", map[string]any{"error": err.Error()})
+	} else {
+		defer func() { _ = tp.Shutdown(context.Background()) }()
+	}
 
 	esAddr := os.Getenv("ES_ADDR")
 	if esAddr == "" {
@@ -44,7 +55,12 @@ func main() {
 	}
 
 	// Auth Configuration
-	authConfig := auth.ResolveConfigFromEnv()
+	deploymentConfig, err := iam.ResolveDeploymentConfigFromEnv()
+	if err != nil {
+		log.Error(ctx, "invalid IAM deployment configuration", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	authConfig := deploymentConfig.AuthConfig
 	internalIssuer := authConfig.InternalIssuerURL
 	externalIssuer := authConfig.ExternalIssuerURL
 	clientID := authConfig.ClientID
@@ -66,19 +82,10 @@ func main() {
 		})
 		os.Exit(1)
 	}
-	if authConfig.TokenValidationMode == auth.TokenModeIntrospection &&
-		(authConfig.IntrospectionClientIDFile != "" || authConfig.IntrospectionSecretFile != "") &&
-		(strings.TrimSpace(authConfig.IntrospectionClientID) == "" || strings.TrimSpace(authConfig.IntrospectionClientSecret) == "") {
-		log.Error(ctx, "introspection credential files are unavailable or empty", map[string]any{
-			"client_id_file_configured":     authConfig.IntrospectionClientIDFile != "",
-			"client_secret_file_configured": authConfig.IntrospectionSecretFile != "",
-		})
-		os.Exit(1)
-	}
 
 	// Initialize Auth Middleware
 	var authMiddleware *auth.Middleware
-	authMiddleware, err := auth.NewMiddleware(ctx, authConfig)
+	authMiddleware, err = auth.NewMiddleware(ctx, authConfig)
 	if err != nil {
 		log.Error(ctx, "failed to initialize auth middleware", map[string]any{"error": err.Error()})
 		os.Exit(1)
@@ -112,11 +119,25 @@ func main() {
 		log.Info(ctx, "auth middleware enabled on router", nil)
 	}
 
-	r.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	livenessHandler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
-	}).Methods("GET")
-	r.HandleFunc("/identity/me", func(w http.ResponseWriter, r *http.Request) {
+	}
+	readinessHandler := func(w http.ResponseWriter, r *http.Request) {
+		checkCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		err := client.Ready(checkCtx)
+		ready := err == nil
+		metrics.SetDependencyReady("workflow-query", "search", ready)
+		w.Header().Set("Content-Type", "application/json")
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "not-ready", "dependency": "search"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ready"})
+	}
+	identityHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		principal, ok := auth.PrincipalFromContext(r.Context())
 		if !ok {
@@ -127,10 +148,18 @@ func main() {
 			"authenticated": true,
 			"principal":     principal,
 		})
-	}).Methods("GET")
+	}
+	r.HandleFunc("/livez", livenessHandler).Methods("GET")
+	r.HandleFunc("/readyz", readinessHandler).Methods("GET")
+	r.HandleFunc("/health", readinessHandler).Methods("GET")
+	r.HandleFunc("/v1/health", readinessHandler).Methods("GET")
+	r.HandleFunc("/identity/me", identityHandler).Methods("GET")
+	r.HandleFunc("/v1/identity/me", identityHandler).Methods("GET")
 
 	// Domain-specific endpoints
 	handler.RegisterRoutes(r)
+	handler.RegisterRoutes(r.PathPrefix("/v1").Subrouter())
+	r.Use(metrics.MuxMiddleware("workflow-query"))
 
 	// Add logging middleware
 	httpMiddleware := logger.NewHTTPMiddleware("http")
@@ -149,19 +178,29 @@ func main() {
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{
 			"Authorization", "Content-Type", "X-Correlation-ID",
-			"X-ArtificialFlow-Acting-Subject", "X-ArtificialFlow-Acting-Username",
-			"X-ArtificialFlow-Acting-Email", "X-ArtificialFlow-Acting-Name",
-			"X-ArtificialFlow-Acting-Roles",
 		},
 		AllowCredentials: allowCredentials,
 	})
 
 	srv := &http.Server{
-		Handler:      httpMiddleware.Middleware(c.Handler(r)),
+		Handler:      otelhttp.NewHandler(httpMiddleware.Middleware(httpproblem.Middleware(c.Handler(r))), "workflow-query.http"),
 		Addr:         addr,
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
 	}
+	metricsServer := &http.Server{
+		Addr: envOrDefault("QUERY_METRICS_ADDR", ":9090"), Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error(ctx, "metrics server failed", map[string]any{"error": err.Error()})
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
+	}()
 
 	// Graceful shutdown
 	go func() {
@@ -198,6 +237,13 @@ func parseAllowedOrigins(raw string) []string {
 		origins = append(origins, v)
 	}
 	return origins
+}
+
+func envOrDefault(key, defaultValue string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 func envBool(key string, defaultValue bool) bool {

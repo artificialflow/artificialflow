@@ -1,98 +1,25 @@
 {{- if .Values.autoscaling.enabled }}
-{{- if .Values.autoscaling.command.enabled }}
+{{- range $component := .Values.autoscaling.components }}
+{{- $name := printf "%s-%s" (include "artificialflow.fullname" $) $component }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "artificialflow.fullname" . }}-command
+  name: {{ $name }}
   labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: command
+    {{- include "artificialflow.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
-    kind: Deployment
-    name: {{ include "artificialflow.fullname" . }}-command
-  minReplicas: {{ .Values.autoscaling.command.minReplicas }}
-  maxReplicas: {{ .Values.autoscaling.command.maxReplicas }}
+    kind: {{ ternary "StatefulSet" "Deployment" (eq $component "command") }}
+    name: {{ $name }}
+  minReplicas: {{ $.Values.autoscaling.minReplicas }}
+  maxReplicas: {{ $.Values.autoscaling.maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.autoscaling.command.targetCPUUtilizationPercentage }}
-{{- end }}
-{{- if .Values.autoscaling.query.enabled }}
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: {{ include "artificialflow.fullname" . }}-query
-  labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: query
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ include "artificialflow.fullname" . }}-query
-  minReplicas: {{ .Values.autoscaling.query.minReplicas }}
-  maxReplicas: {{ .Values.autoscaling.query.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.autoscaling.query.targetCPUUtilizationPercentage }}
-{{- end }}
-{{- if .Values.autoscaling.frontend.enabled }}
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: {{ include "artificialflow.fullname" . }}-frontend
-  labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: frontend
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ include "artificialflow.fullname" . }}-frontend
-  minReplicas: {{ .Values.autoscaling.frontend.minReplicas }}
-  maxReplicas: {{ .Values.autoscaling.frontend.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.autoscaling.frontend.targetCPUUtilizationPercentage }}
-{{- end }}
-{{- if .Values.autoscaling.gateway.enabled }}
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: {{ include "artificialflow.fullname" . }}-gateway
-  labels:
-    {{- include "artificialflow.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gateway
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ include "artificialflow.fullname" . }}-gateway
-  minReplicas: {{ .Values.autoscaling.gateway.minReplicas }}
-  maxReplicas: {{ .Values.autoscaling.gateway.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.autoscaling.gateway.targetCPUUtilizationPercentage }}
+        target: {type: Utilization, averageUtilization: {{ $.Values.autoscaling.targetCPUUtilizationPercentage }}}
 {{- end }}
 {{- end }}

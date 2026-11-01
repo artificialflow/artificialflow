@@ -9,20 +9,30 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	esadapter "github.com/artificialflow/artificialflow/backend/libs/elasticsearch"
 	"github.com/artificialflow/artificialflow/backend/libs/logger"
+	"github.com/artificialflow/artificialflow/backend/libs/metrics"
+	"github.com/artificialflow/artificialflow/backend/libs/tracing"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/application"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/infrastructure/messaging"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/infrastructure/persistence"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
 	log := logger.New("sync-worker")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	tp, err := tracing.InitTracer(ctx, "sync-worker")
+	if err != nil {
+		log.Error(ctx, "failed to initialize tracing", map[string]any{"error": err.Error()})
+	} else {
+		defer func() { _ = tp.Shutdown(context.Background()) }()
+	}
 
 	kafkaBrokers := envOrDefault("KAFKA_BROKERS", "localhost:9092")
 	groupID := envOrDefault("KAFKA_GROUP_ID", "artificialflow-sync-worker")
@@ -54,13 +64,13 @@ func main() {
 		os.Exit(1)
 	}
 	dlqTopic := strings.TrimSpace(envOrDefault("KAFKA_DLQ_TOPIC", "workflow.sync.dlq"))
+	topicPartitions := envInt("KAFKA_TOPIC_PARTITIONS", 0)
 	maxProcessRetries := envInt("SYNC_MAX_PROCESS_RETRIES", 3)
 	retryBackoff := parseDurationEnv("SYNC_RETRY_BACKOFF", 500*time.Millisecond)
 
 	esAddr := envOrDefault("ES_ADDR", "http://localhost:9200")
 	indexPrefix := envOrDefault("ES_INDEX_PREFIX", "artificialflow")
 	logLevel := envOrDefault("LOG_LEVEL", "INFO")
-	eventBusType := strings.ToLower(strings.TrimSpace(envOrDefault("EVENT_BUS_TYPE", "kafka")))
 	connectBootstrapEnabled := envBool("CONNECT_BOOTSTRAP_ENABLED", true)
 	connectURL := strings.TrimSpace(envOrDefault("CONNECT_URL", "http://connect:8083"))
 	connectorName := strings.TrimSpace(envOrDefault("CONNECTOR_NAME", "artificialflow-postgres-connector"))
@@ -78,6 +88,7 @@ func main() {
 	metricsAddr := strings.TrimSpace(envOrDefault("SYNC_METRICS_ADDR", ":8092"))
 	freshnessSLOSec := int64(envInt("SYNC_FRESHNESS_SLO_SEC", 120))
 	failOnStale := envBool("SYNC_HEALTH_FAIL_ON_STALE", false)
+	tenantMode := strings.ToLower(strings.TrimSpace(envOrDefault("TENANT_MODE", "compat")))
 
 	log.Info(ctx, "initializing sync-worker", map[string]any{
 		"kafka_brokers":     kafkaBrokers,
@@ -86,11 +97,11 @@ func main() {
 		"event_topic":       eventTopic,
 		"contract":          projectionContract,
 		"kafka_dlq":         dlqTopic,
+		"topic_partitions":  topicPartitions,
 		"retry_max":         maxProcessRetries,
 		"retry_backoff":     retryBackoff.String(),
 		"es_addr":           esAddr,
 		"index_prefix":      indexPrefix,
-		"event_bus_type":    eventBusType,
 		"connect_bootstrap": connectBootstrapEnabled,
 		"connector_name":    connectorName,
 		"metrics_addr":      metricsAddr,
@@ -111,79 +122,97 @@ func main() {
 	// DDD Assembly
 	repo := persistence.NewESRepository(esClientRepo)
 	service := application.NewSyncService(repo, indexPrefix)
-	// Messaging Configuration
-	var consumer messaging.EventConsumer
-
-	switch eventBusType {
-	case "nats":
-		natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
-		log.Info(ctx, "initializing nats consumer", map[string]any{"url": natsURL})
-		consumer = messaging.NewNatsConsumer(natsURL, service)
-	default:
-		// Default to Kafka
-		log.Info(ctx, "initializing kafka consumer", map[string]any{
-			"brokers": kafkaBrokers,
-			"group":   groupID,
-			"topics":  kafkaTopics,
-		})
-		consumer = messaging.NewKafkaConsumer(messaging.Config{
-			Brokers:           splitAndTrim(kafkaBrokers),
-			GroupID:           groupID,
-			Topics:            kafkaTopics,
-			DLQTopic:          dlqTopic,
-			MaxProcessRetries: maxProcessRetries,
-			RetryBackoff:      retryBackoff,
-		}, service)
-	}
+	log.Info(ctx, "initializing kafka consumer", map[string]any{
+		"brokers": kafkaBrokers,
+		"group":   groupID,
+		"topics":  kafkaTopics,
+	})
+	var consumer messaging.EventConsumer = messaging.NewKafkaConsumer(messaging.Config{
+		Brokers:           splitAndTrim(kafkaBrokers),
+		GroupID:           groupID,
+		Topics:            kafkaTopics,
+		DLQTopic:          dlqTopic,
+		MaxProcessRetries: maxProcessRetries,
+		RetryBackoff:      retryBackoff,
+		TenantMode:        tenantMode,
+	}, service)
 
 	var statsProvider messaging.ConsumerStatsProvider
 	if provider, ok := consumer.(messaging.ConsumerStatsProvider); ok {
 		statsProvider = provider
 	}
-	startSyncHealthServer(ctx, log, metricsAddr, statsProvider, freshnessSLOSec, failOnStale)
-
-	if eventBusType != "nats" {
-		// Pre-create subscription topics before the consumer joins the group.
-		// Debezium otherwise creates them asynchronously after connector RUNNING,
-		// and kafka-go can get a permanent empty assignment until restart.
-		topicsToEnsure := append([]string{}, kafkaTopics...)
-		if dlqTopic != "" {
-			topicsToEnsure = append(topicsToEnsure, dlqTopic)
-		}
-		log.Info(ctx, "ensuring kafka topics exist before consumer start", map[string]any{
-			"topics": topicsToEnsure,
-		})
-		if err := messaging.EnsureTopicsReady(ctx, splitAndTrim(kafkaBrokers), topicsToEnsure, connectWaitTimeout); err != nil {
-			log.Error(ctx, "failed to ensure kafka topics", map[string]any{"error": err.Error()})
-			os.Exit(1)
-		}
-
-		if err := ensureConnectorBootstrap(ctx, log, connectorBootstrapOptions{
-			Enabled:                  connectBootstrapEnabled,
-			ConnectURL:               connectURL,
-			ConnectorName:            connectorName,
-			ConnectorFile:            connectorFile,
-			ConnectorJSON:            connectorJSON,
-			ConnectorTopicPrefix:     connectorTopicPrefix,
-			ConnectorSlotName:        connectorSlotName,
-			ConnectorDatabaseUser:    connectorDatabaseUser,
-			WaitTimeout:              connectWaitTimeout,
-			PollInterval:             3 * time.Second,
-			BlockedConnectorNames:    conflictingConnectorNames(connectorName),
-			AllowParallelIdentifiers: allowParallelConnectors,
-		}); err != nil {
-			log.Error(ctx, "failed to bootstrap connector", map[string]any{"error": err.Error()})
-			os.Exit(1)
-		}
-
-		log.Info(ctx, "re-checking kafka topic readiness after connector bootstrap", map[string]any{
-			"topics": topicsToEnsure,
-		})
-		if err := messaging.EnsureTopicsReady(ctx, splitAndTrim(kafkaBrokers), topicsToEnsure, connectWaitTimeout); err != nil {
-			log.Error(ctx, "failed to ensure kafka topics after connector bootstrap", map[string]any{"error": err.Error()})
-			os.Exit(1)
-		}
+	if statsProvider != nil {
+		prometheus.MustRegister(metrics.NewSyncCollector(func() metrics.SyncSnapshot {
+			s := statsProvider.Snapshot()
+			return metrics.SyncSnapshot{
+				Processed: s.Processed, Succeeded: s.Succeeded, Failed: s.Failed,
+				Retried: s.Retried, DeadLetters: s.DLQPublished, LastProcessedAt: s.LastProcessedAt,
+			}
+		}))
 	}
+	var bootstrapped atomic.Bool
+	startSyncHealthServer(ctx, log, metricsAddr, statsProvider, freshnessSLOSec, failOnStale, func(ctx context.Context) error {
+		if !bootstrapped.Load() {
+			return fmt.Errorf("consumer bootstrap has not completed")
+		}
+		searchReady := esClient.Ready(ctx) == nil
+		brokerReady := true
+		if checker, ok := consumer.(interface{ Ready(context.Context) error }); ok {
+			brokerReady = checker.Ready(ctx) == nil
+		}
+		metrics.SetDependencyReady("sync-worker", "search", searchReady)
+		metrics.SetDependencyReady("sync-worker", "broker", brokerReady)
+		if !searchReady || !brokerReady {
+			return fmt.Errorf("search or broker dependency is unavailable")
+		}
+		return nil
+	})
+
+	// Pre-create subscription topics before the consumer joins the group.
+	// Debezium otherwise creates them asynchronously after connector RUNNING,
+	// and kafka-go can get a permanent empty assignment until restart.
+	topicsToEnsure := append([]string{}, kafkaTopics...)
+	if dlqTopic != "" {
+		topicsToEnsure = append(topicsToEnsure, dlqTopic)
+	}
+	log.Info(ctx, "ensuring kafka topics exist before consumer start", map[string]any{
+		"topics": topicsToEnsure,
+	})
+	if err := messaging.EnsureTopicsReady(ctx, splitAndTrim(kafkaBrokers), topicsToEnsure, topicPartitions, connectWaitTimeout); err != nil {
+		log.Error(ctx, "failed to ensure kafka topics", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+
+	if err := ensureConnectorBootstrap(ctx, log, connectorBootstrapOptions{
+		Enabled:                  connectBootstrapEnabled,
+		ConnectURL:               connectURL,
+		ConnectorName:            connectorName,
+		ConnectorFile:            connectorFile,
+		ConnectorJSON:            connectorJSON,
+		ConnectorTopicPrefix:     connectorTopicPrefix,
+		ConnectorSlotName:        connectorSlotName,
+		ConnectorDatabaseUser:    connectorDatabaseUser,
+		ConnectorDatabaseHost:    strings.TrimSpace(os.Getenv("CONNECTOR_DATABASE_HOSTNAME")),
+		ConnectorDatabasePort:    strings.TrimSpace(os.Getenv("CONNECTOR_DATABASE_PORT")),
+		ConnectorDatabaseName:    strings.TrimSpace(os.Getenv("CONNECTOR_DATABASE_NAME")),
+		ConnectorDatabasePass:    strings.TrimSpace(os.Getenv("CONNECTOR_DATABASE_PASSWORD")),
+		WaitTimeout:              connectWaitTimeout,
+		PollInterval:             3 * time.Second,
+		BlockedConnectorNames:    conflictingConnectorNames(connectorName),
+		AllowParallelIdentifiers: allowParallelConnectors,
+	}); err != nil {
+		log.Error(ctx, "failed to bootstrap connector", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+
+	log.Info(ctx, "re-checking kafka topic readiness after connector bootstrap", map[string]any{
+		"topics": topicsToEnsure,
+	})
+	if err := messaging.EnsureTopicsReady(ctx, splitAndTrim(kafkaBrokers), topicsToEnsure, topicPartitions, connectWaitTimeout); err != nil {
+		log.Error(ctx, "failed to ensure kafka topics after connector bootstrap", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	bootstrapped.Store(true)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -346,18 +375,33 @@ func conflictingConnectorNames(connectorName string) []string {
 	return nil
 }
 
-func startSyncHealthServer(ctx context.Context, log *logger.Logger, addr string, provider messaging.ConsumerStatsProvider, sloSec int64, failOnStale bool) {
+func startSyncHealthServer(ctx context.Context, log *logger.Logger, addr string, provider messaging.ConsumerStatsProvider, sloSec int64, failOnStale bool, dependencyReady func(context.Context) error) {
 	if strings.TrimSpace(addr) == "" {
 		return
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	})
+	readyHandler := func(w http.ResponseWriter, r *http.Request) {
 		snapshot := messaging.ConsumerStatsSnapshot{}
 		if provider != nil {
 			snapshot = provider.Snapshot()
 		}
 		status, lagSec, stale, httpStatus := evaluateSyncHealth(snapshot, sloSec, failOnStale)
+		dependencyOK := dependencyReady != nil
+		if dependencyReady != nil {
+			checkCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			dependencyOK = dependencyReady(checkCtx) == nil
+			cancel()
+		}
+		if !dependencyOK {
+			status = "not-ready"
+			httpStatus = http.StatusServiceUnavailable
+		}
+		metrics.SetWorkLag("sync-worker", "projection", float64(lagSec))
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(httpStatus)
@@ -375,7 +419,10 @@ func startSyncHealthServer(ctx context.Context, log *logger.Logger, addr string,
 			"topics":             snapshot.Topics,
 			"failOnStaleEnabled": failOnStale,
 		})
-	})
+	}
+	mux.HandleFunc("/readyz", readyHandler)
+	mux.HandleFunc("/health", readyHandler)
+	mux.Handle("/metrics", metrics.Handler())
 
 	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

@@ -14,6 +14,8 @@ func TestOutboxCollectorExposesCanonicalMetrics(t *testing.T) {
 			Pending:        3,
 			PublishSuccess: 7,
 			PublishFailure: 2,
+			Retries:        4,
+			DeadLetters:    1,
 			PublishLagSec:  11,
 		}
 	})
@@ -29,9 +31,11 @@ func TestOutboxCollectorExposesCanonicalMetrics(t *testing.T) {
 	}
 
 	expected := map[string]float64{
-		"artificialflow_outbox_pending":              3,
+		"artificialflow_outbox_pending":               3,
 		"artificialflow_outbox_publish_success_total": 7,
 		"artificialflow_outbox_publish_failure_total": 2,
+		"artificialflow_outbox_retries_total":         4,
+		"artificialflow_outbox_dead_letters_total":    1,
 		"artificialflow_outbox_publish_lag_seconds":   11,
 	}
 	for name, want := range expected {

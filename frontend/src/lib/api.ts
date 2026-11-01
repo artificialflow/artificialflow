@@ -11,6 +11,27 @@ export const setAccessToken = (token: string | null) => {
   accessToken = token;
 };
 
+export class ConsoleLoginError extends Error {}
+
+/** Checks the console admin credentials when IAM is disabled. No token is issued. */
+export async function consoleLogin(username: string, password: string): Promise<IdentityPrincipal> {
+  const correlationId = generateCorrelationId();
+  const response = await fetch(`${API_BASE_URL}/identity/login`, {
+    method: 'POST',
+    headers: { ...getHeaders(correlationId), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (response.status === 401) {
+    throw new ConsoleLoginError('Invalid username or password');
+  }
+  if (!response.ok) {
+    log.error('console login failed', { correlationId, status: response.status });
+    throw new ConsoleLoginError(`Sign-in failed (${response.status})`);
+  }
+  const body = (await response.json()) as { principal: IdentityPrincipal };
+  return body.principal;
+}
+
 const getHeaders = (correlationId: string) => {
   const headers: Record<string, string> = {
     'X-Correlation-ID': correlationId,
@@ -47,6 +68,24 @@ export interface WorkflowInstance {
   updated_at: string;
 }
 
+export interface InstanceMigrationRequest {
+  sourceDefinitionKey: string;
+  targetDefinitionKey: string;
+  elementMapping: Record<string, string>;
+  operationId?: string;
+}
+
+export interface InstanceMigrationResult {
+  operationId: string;
+  instanceKey: string;
+  dryRun: boolean;
+  status: "VALIDATED" | "APPLIED" | "REJECTED";
+  reasonCode?: string;
+  message?: string;
+  sourceVersion?: number;
+  targetVersion?: number;
+}
+
 export interface IdentityPrincipal {
   subject: string;
   issuer?: string;
@@ -55,7 +94,6 @@ export interface IdentityPrincipal {
   name?: string;
   tenant_id?: string;
   roles?: string[];
-  scopes?: string[];
   token_mode?: string;
   claims?: Record<string, unknown>;
 }
@@ -66,8 +104,7 @@ export interface IdentityResponse {
 }
 
 export interface IdentityConfigResponse {
-  deployment_mode: string;
-  configuration_source: string;
+  deployment_mode: boolean;
   provider_name: string;
   auth_enabled: boolean;
   frontend_auth_enabled: boolean;
@@ -84,112 +121,10 @@ export interface IdentityConfigResponse {
   allow_insecure_issuer: boolean;
   claim_subject_path: string;
   claim_roles_path: string;
-  claim_scopes_path: string;
   claim_tenant_path: string;
   claim_email_path: string;
   claim_name_path: string;
   standard_roles: string[];
-}
-
-export interface IdentityManagementUser {
-  id: string;
-  username: string;
-  preferred_login_name: string;
-  display_name: string;
-  given_name: string;
-  family_name: string;
-  email: string;
-  email_verified: boolean;
-  state: string;
-  type: string;
-  created_at: string;
-  changed_at: string;
-  roles: string[];
-}
-
-export interface IdentityManagementRole {
-  key: string;
-  display_name: string;
-  group: string;
-}
-
-export interface IdentityManagementClientCredential {
-  id: string;
-  type: "private_key_jwt" | "legacy_pat" | string;
-  created_at: string;
-  changed_at?: string;
-  expires_at: string;
-  status: string;
-}
-
-export interface IdentityManagementClientTokenSummary {
-  token_id: string;
-  token_created_at: string;
-  token_changed_at: string;
-  token_expires_at: string;
-  status: string;
-}
-
-export interface IdentityManagementClient {
-  client_id: string;
-  username: string;
-  name: string;
-  description: string;
-  environment: string;
-  owner_email: string;
-  purpose: string;
-  role: string;
-  state: string;
-  created_at: string;
-  changed_at: string;
-  credentials: IdentityManagementClientCredential[];
-  tokens: IdentityManagementClientTokenSummary[];
-}
-
-export interface CreateIdentityManagementUserRequest {
-  username: string;
-  given_name: string;
-  family_name: string;
-  email: string;
-  password: string;
-  password_change_required: boolean;
-  roles: string[];
-}
-
-export interface CreateIdentityManagementClientKeyRequest {
-  username?: string;
-  name: string;
-  description?: string;
-  environment?: string;
-  owner_email?: string;
-  purpose?: string;
-  public_key: string;
-  key_expires_at?: string;
-}
-
-export interface AddIdentityManagementClientKeyRequest {
-  public_key: string;
-  key_expires_at?: string;
-}
-
-export interface UpdateIdentityManagementUserRequest {
-  username?: string;
-  given_name?: string;
-  family_name?: string;
-  display_name?: string;
-  email?: string;
-  roles?: string[];
-}
-
-export interface CreateIdentityManagementRoleRequest {
-  key: string;
-  display_name: string;
-  group: string;
-}
-
-export interface UpdateIdentityManagementRoleRequest {
-  display_name: string;
-  group: string;
 }
 
 export interface Execution {
@@ -595,55 +530,6 @@ export const api = {
     log.info('user task completed', { instanceId, executionId });
   },
 
-  listInboxInstances: async (): Promise<WorkflowInstance[]> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/inbox`, { headers: getHeaders(correlationId) });
-    if (!response.ok) {
-      const detail = (await response.text()).trim() || response.statusText;
-      throw new Error(`Failed to load inbox: ${detail}`);
-    }
-    const data = await response.json();
-    return Array.isArray(data) ? data : data.instances || data || [];
-  },
-
-  listInboxTasks: async (instanceId: string): Promise<UserTask[]> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/inbox/instances/${instanceId}/tasks`, {
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).trim() || response.statusText;
-      throw new Error(`Failed to load inbox tasks: ${detail}`);
-    }
-    const data = await response.json();
-    return data.tasks || [];
-  },
-
-  claimInboxTask: async (instanceId: string, executionId: string): Promise<UserTask> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/inbox/instances/${instanceId}/tasks/${executionId}/claim`, {
-      method: "POST",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).trim() || response.statusText;
-      throw new Error(`Failed to claim inbox task: ${detail}`);
-    }
-    return response.json();
-  },
-
-  completeInboxTask: async (instanceId: string, executionId: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/inbox/instances/${instanceId}/tasks/${executionId}/complete`, {
-      method: "POST",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).trim() || response.statusText;
-      throw new Error(`Failed to complete inbox task: ${detail}`);
-    }
-  },
-
   listInstanceJobs: async (instanceId: string): Promise<InstanceJob[]> => {
     const correlationId = generateCorrelationId();
     const response = await fetch(`${API_BASE_URL}/instances/${instanceId}/jobs`, {
@@ -696,6 +582,19 @@ export const api = {
     }
   },
 
+  resolveIncident: async (incidentKey: string | number): Promise<Incident> => {
+    const correlationId = generateCorrelationId();
+    const response = await fetch(`${API_BASE_URL}/incidents/${encodeURIComponent(String(incidentKey))}/resolve`, {
+      method: "POST",
+      headers: getHeaders(correlationId),
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).trim() || response.statusText;
+      throw new Error(`Failed to resolve incident: ${detail}`);
+    }
+    return response.json();
+  },
+
   failJob: async (jobKey: string | number, worker = "ops-admin", errorMessage = "Failed by operator"): Promise<void> => {
     const correlationId = generateCorrelationId();
     const headers = getHeaders(correlationId);
@@ -726,6 +625,30 @@ export const api = {
     log.info('instance deleted', { instanceId: id });
   },
 
+  migrateInstance: async (
+    id: string,
+    request: InstanceMigrationRequest,
+    dryRun = false,
+  ): Promise<InstanceMigrationResult> => {
+    const correlationId = generateCorrelationId();
+    const headers = getHeaders(correlationId);
+    headers["Content-Type"] = "application/json";
+    const suffix = dryRun ? "/dry-run" : "";
+    const response = await fetch(`${API_BASE_URL}/instances/${encodeURIComponent(id)}/migration${suffix}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    const body = await response.json().catch(() => null) as InstanceMigrationResult | null;
+    if (!response.ok && !body) {
+      throw new Error(`Failed to migrate instance: ${response.statusText}`);
+    }
+    if (!body) {
+      throw new Error("Migration endpoint returned an empty response");
+    }
+    return body;
+  },
+
   getIdentity: async (): Promise<IdentityResponse> => {
     const correlationId = generateCorrelationId();
     log.debug('fetching identity', { correlationId });
@@ -754,210 +677,4 @@ export const api = {
     return response.json();
   },
 
-  getIdentityManagementUsers: async (): Promise<IdentityManagementUser[]> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/users`, {
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch identity users: ${response.statusText}`);
-    }
-    const data = await response.json();
-    return data.users || [];
-  },
-
-  createIdentityManagementUser: async (request: CreateIdentityManagementUserRequest): Promise<IdentityManagementUser> => {
-    const correlationId = generateCorrelationId();
-    const headers = getHeaders(correlationId);
-    headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}/identity/management/users`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create identity user: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  createIdentityManagementClientKey: async (request: CreateIdentityManagementClientKeyRequest): Promise<IdentityManagementClient> => {
-    const correlationId = generateCorrelationId();
-    const headers = getHeaders(correlationId);
-    headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}/identity/management/clients`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create ArtificialFlow client: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  getIdentityManagementClients: async (): Promise<IdentityManagementClient[]> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/clients`, {
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ArtificialFlow clients: ${response.statusText}`);
-    }
-    const data = await response.json();
-    return data.clients || [];
-  },
-
-  addIdentityManagementClientKey: async (id: string, request: AddIdentityManagementClientKeyRequest): Promise<IdentityManagementClientCredential> => {
-    const correlationId = generateCorrelationId();
-    const headers = getHeaders(correlationId);
-    headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}/identity/management/clients/${encodeURIComponent(id)}/keys`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to add ArtificialFlow client key: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  revokeIdentityManagementClientKey: async (id: string, keyId: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/clients/${encodeURIComponent(id)}/keys/${encodeURIComponent(keyId)}`, {
-      method: "DELETE",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to revoke ArtificialFlow client key: ${response.statusText}`);
-    }
-  },
-
-  revokeIdentityManagementClientToken: async (id: string, tokenId: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/clients/${encodeURIComponent(id)}/tokens/${encodeURIComponent(tokenId)}`, {
-      method: "DELETE",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to revoke ArtificialFlow client token: ${response.statusText}`);
-    }
-  },
-
-  deleteIdentityManagementClient: async (id: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/clients/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete ArtificialFlow client: ${response.statusText}`);
-    }
-  },
-
-  updateIdentityManagementUser: async (id: string, request: UpdateIdentityManagementUserRequest): Promise<IdentityManagementUser> => {
-    const correlationId = generateCorrelationId();
-    const headers = getHeaders(correlationId);
-    headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}/identity/management/users/${encodeURIComponent(id)}`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to update identity user: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  terminateIdentityManagementUser: async (id: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/users/${encodeURIComponent(id)}/terminate`, {
-      method: "POST",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to terminate identity user: ${response.statusText}`);
-    }
-  },
-
-  reactivateIdentityManagementUser: async (id: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/users/${encodeURIComponent(id)}/reactivate`, {
-      method: "POST",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to reactivate identity user: ${response.statusText}`);
-    }
-  },
-
-  activateIdentityManagementUser: async (id: string): Promise<void> => {
-    return api.reactivateIdentityManagementUser(id);
-  },
-
-  deleteIdentityManagementUser: async (id: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/users/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete identity user: ${response.statusText}`);
-    }
-  },
-
-  getIdentityManagementRoles: async (): Promise<IdentityManagementRole[]> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/roles`, {
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch identity roles: ${response.statusText}`);
-    }
-    const data = await response.json();
-    return data.roles || [];
-  },
-
-  createIdentityManagementRole: async (request: CreateIdentityManagementRoleRequest): Promise<IdentityManagementRole> => {
-    const correlationId = generateCorrelationId();
-    const headers = getHeaders(correlationId);
-    headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}/identity/management/roles`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create identity role: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  updateIdentityManagementRole: async (key: string, request: UpdateIdentityManagementRoleRequest): Promise<IdentityManagementRole> => {
-    const correlationId = generateCorrelationId();
-    const headers = getHeaders(correlationId);
-    headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}/identity/management/roles/${encodeURIComponent(key)}`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to update identity role: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  deleteIdentityManagementRole: async (key: string): Promise<void> => {
-    const correlationId = generateCorrelationId();
-    const response = await fetch(`${API_BASE_URL}/identity/management/roles/${encodeURIComponent(key)}`, {
-      method: "DELETE",
-      headers: getHeaders(correlationId),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete identity role: ${response.statusText}`);
-    }
-  },
 };

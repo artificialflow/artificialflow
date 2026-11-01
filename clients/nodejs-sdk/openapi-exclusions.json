@@ -1,0 +1,3 @@
+{
+  "consoleLogin": "Console-only sign-in for IAM-disabled deployments; SDK calls need no credentials in that mode."
+}

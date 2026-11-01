@@ -27,7 +27,7 @@ func (m *MockRepository) SearchInstances(ctx context.Context, filter repository.
 	if filter.State != "" {
 		filtered := make([]model.ProcessInstance, 0)
 		for _, instance := range m.instances {
-			if instance.State == filter.State {
+			if string(instance.State) == filter.State {
 				filtered = append(filtered, instance)
 			}
 		}
@@ -85,7 +85,7 @@ func registerTestRoutes(r *mux.Router, h *Handler) {
 			if _, ok := auth.PrincipalFromContext(req.Context()); !ok {
 				principal := auth.Principal{
 					Subject: "test-admin",
-					Roles:   []string{auth.RoleArtificialFlowAdmin},
+					Roles:   []string{auth.RoleAdmin},
 				}
 				req = req.WithContext(auth.WithPrincipal(req.Context(), principal))
 			}
@@ -165,7 +165,7 @@ func TestModelerReadsWorkflowProjectionOnly(t *testing.T) {
 	h := setupTestHandler()
 	r := mux.NewRouter()
 	registerTestRoutes(r, h)
-	modeler := auth.Principal{Subject: "modeler", Roles: []string{auth.RoleArtificialFlowModeler}}
+	modeler := auth.Principal{Subject: "modeler", Roles: []string{auth.RoleBusiness}}
 
 	workflowsReq, _ := http.NewRequest("GET", "/workflows", nil)
 	workflowsReq = workflowsReq.WithContext(auth.WithPrincipal(workflowsReq.Context(), modeler))

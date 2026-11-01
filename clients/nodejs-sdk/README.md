@@ -9,92 +9,42 @@ npm install
 npm run build
 ```
 
-Install the public package with `npm install @artificialflow/nodejs-sdk`. For
-one transition release, the deprecated `@artificialflow/nodejs-sdk` wrapper re-exports
-remain deprecated aliases to the exact canonical implementations.
+Install the public package with `npm install @artificialflow/nodejs-sdk`.
 
 ## Client
 
-The SDK calls ArtificialFlow through the gateway API and needs an access token with the `artificialflow client` role.
+The SDK calls ArtificialFlow through the gateway API. With `IAM_DEPLOYMENT_MODE=true` it needs an access token with the `artificialflowclient` role.
 
-External human task inbox applications should keep that `artificialflow client` token on their backend-for-frontend (BFF). The BFF authenticates the signed-in user with IAM, rejects admin/client users from the app, then calls SDK inbox methods with the acting user's username/email/roles so ArtificialFlow can filter tasks by assignee, candidate user, or candidate group.
+Users, clients, and tokens live in your external OIDC provider. ArtificialFlow does not create or manage SDK credentials.
 
-### Bundled ZITADEL mode
-
-For new clients, create a private-key credential from ArtificialFlow's **SDK Clients** page and store the downloaded profile in a secret manager. The SDK signs a five-minute RS256 assertion and exchanges it for short-lived ZITADEL access tokens automatically:
+When ArtificialFlow runs with `IAM_DEPLOYMENT_MODE=false` (no IAM provider), configure no
+credentials at all: the SDK sends no `Authorization` header and the API
+accepts the call.
 
 ```ts
-import fs from 'node:fs';
-import { ArtificialFlowClient, ZitadelJwtProfile } from '@artificialflow/nodejs-sdk';
-
-const profile = JSON.parse(
-  fs.readFileSync(process.env.ARTIFICIALFLOW_ZITADEL_PROFILE_FILE!, 'utf8'),
-) as ZitadelJwtProfile;
-
-const client = new ArtificialFlowClient({
-  baseUrl: 'http://localhost:9100/api',
-  auth: {
-    type: 'zitadel-jwt-profile',
-    profile,
-  },
-});
+const client = new ArtificialFlowClient({ baseUrl: 'http://localhost:9100/api' });
 ```
 
-The service-account profile has this shape:
+Applications that show user tasks to their own end users keep that `artificialflowclient` token on their backend. The application signs end users in with its own IAM and validates their tokens itself; ArtificialFlow never sees end-user tokens. It only receives the end user's identity as plain filter values (see [User tasks](#user-tasks)).
 
-```json
-{
-  "type": "serviceaccount",
-  "keyId": "key-id",
-  "key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "userId": "machine-user-id",
-  "issuer": "https://identity.example.com",
-  "tokenUrl": "https://identity.example.com/oauth/v2/token",
-  "scopes": [
-    "openid",
-    "urn:zitadel:iam:org:projects:roles",
-    "urn:zitadel:iam:org:project:id:project-id:aud"
-  ]
-}
-```
+### Authentication
 
-Keep the profile out of source control, logs, command-line arguments, and environment-variable values. Restrict its file permissions to the workload identity. Rotation should add and deploy a new key before revoking the old key.
-
-Existing legacy clients may continue using a raw PAT during migration:
-
-- Sign in as an `artificialflow admin`
-- Open **SDK Clients**
-- Copy the previously issued ZITADEL Personal Access Token
-- Set its raw value as `ARTIFICIALFLOW_TOKEN` (do not include `Bearer `)
-
-ArtificialFlow validates legacy PATs with authenticated ZITADEL introspection on every request. Expired or revoked PATs and PATs belonging to terminated/deleted clients return `401`. New PAT issuance and rotation may be disabled by the deployment's migration policy.
-
-### External IAM mode
-
-When ArtificialFlow is deployed with `docker-compose.external-iam.yml`, ArtificialFlow does not create or manage SDK tokens. The external IAM administrator must prepare the provider and issue the SDK token.
-
-External IAM requirements:
+Configure ArtificialFlow against your provider:
 
 - Create or register a backend/API resource for ArtificialFlow.
   - Default audience/client ID: `workflow-backend`
   - Match the ArtificialFlow backend setting `AUTH_CLIENT_ID`
-- Configure the ArtificialFlow backend issuer settings.
-  - `AUTH_ISSUER_INTERNAL_URL`
-  - `AUTH_ISSUER_PUBLIC_URL`
-  - `AUTH_TOKEN_MODE=jwt` for JWT access tokens, or `AUTH_TOKEN_MODE=introspection` for opaque tokens
-- If audience validation is enabled with `AUTH_ENFORCE_AUDIENCE=true`, issue tokens whose `aud` contains `workflow-backend`.
-- Create only the ArtificialFlow roles needed by the external IAM deployment.
-  - `artificialflow admin`
-  - `artificialflow modeler`
-  - `artificialflow client`
-- Map roles into a token claim read by `AUTH_CLAIM_ROLES_PATH`.
-  - Default paths: `roles,realm_access.roles,groups`
-  - The SDK/service account token must include `artificialflow client`
-- Create a machine-to-machine, service-account, or client-credentials application for the SDK integration.
-  - Grant only `artificialflow client`
-  - Prefer short-lived tokens and rotate the client secret in the external IAM
-- Use the SDK's OAuth client-credentials provider, a custom token callback, or
-  issue a token from the external IAM and set it as `ARTIFICIALFLOW_TOKEN`.
+- Configure issuer settings: `AUTH_ISSUER_INTERNAL_URL`, `AUTH_ISSUER_PUBLIC_URL`
+- Use `AUTH_TOKEN_MODE=jwt` for JWT access tokens, or `AUTH_TOKEN_MODE=introspection` for opaque tokens
+- If `AUTH_ENFORCE_AUDIENCE=true`, issue tokens whose `aud` contains `workflow-backend`
+- Create these roles in the provider and map them into `AUTH_CLAIM_ROLES_PATH`:
+  - `artificialflowadmin`: full access
+  - `artificialflowbusiness`: process-design access (deploy, view, update workflows and decisions)
+  - `artificialflowclient`: SDK/API clients
+  - `artificialflowanalytics`: reserved for analytics
+- Create a machine-to-machine / client-credentials application for the SDK
+  - Grant only `artificialflowclient`
+  - Prefer short-lived tokens and rotate the client secret in the provider
 
 Standard client-credentials example with automatic token caching and refresh:
 
@@ -102,7 +52,7 @@ Standard client-credentials example with automatic token caching and refresh:
 import { ArtificialFlowClient } from '@artificialflow/nodejs-sdk';
 
 const client = new ArtificialFlowClient({
-  baseUrl: 'http://localhost:9100/api',
+  baseUrl: 'http://localhost:9100/api/v1',
   auth: {
     type: 'oauth-client-credentials',
     profile: {
@@ -120,7 +70,24 @@ If your provider requires HTTP Basic client authentication or a custom
 `audience`/`resource` parameter, use its OAuth library and supply
 `token: () => getProviderAccessToken()` instead.
 
-Generic client-credentials example:
+Static token example:
+
+```ts
+import { ArtificialFlowClient } from '@artificialflow/nodejs-sdk';
+
+const client = new ArtificialFlowClient({
+  baseUrl: 'http://localhost:9100/api/v1',
+  token: process.env.ARTIFICIALFLOW_TOKEN,
+});
+
+const workflows = await client.listWorkflows({ page: 1, pageSize: 100 });
+const instance = await client.startInstance('order-process', { orderId: '123' });
+await client.publishMessage('MsgOrderPlaced', '123', { amount: 100 });
+await client.publishSignal('OrderApproved', { orderId: '123' });
+await client.publishEscalation('NEED_HELP', { reason: 'timeout' });
+```
+
+Generic client-credentials token mint:
 
 ```bash
 export ARTIFICIALFLOW_TOKEN="$(
@@ -133,26 +100,10 @@ export ARTIFICIALFLOW_TOKEN="$(
 )"
 ```
 
-Use your provider-specific token endpoint, client ID, client secret, scope, and audience/resource parameter if required.
+## User tasks
 
-```ts
-import { ArtificialFlowClient } from '@artificialflow/nodejs-sdk';
-
-const client = new ArtificialFlowClient({
-  baseUrl: 'http://localhost:9100/api',
-  token: process.env.ARTIFICIALFLOW_TOKEN,
-});
-
-const workflows = await client.listWorkflows({ page: 1, pageSize: 100 });
-const instance = await client.startInstance('order-process', { orderId: '123' });
-await client.publishMessage('MsgOrderPlaced', '123', { amount: 100 });
-await client.publishSignal('OrderApproved', { orderId: '123' });
-await client.publishEscalation('NEED_HELP', { reason: 'timeout' });
-```
-
-## Human task inbox
-
-Use a backend-held `artificialflow client` token for external task inbox applications. Pass the signed-in user's identity to each inbox call:
+Your application authenticates the end user, then asks ArtificialFlow for the
+tasks that user can act on:
 
 ```ts
 import { ArtificialFlowClient } from '@artificialflow/nodejs-sdk';
@@ -162,23 +113,21 @@ const client = new ArtificialFlowClient({
   token: process.env.ARTIFICIALFLOW_TOKEN,
 });
 
-const actingUser = {
-  subject: signedInUser.subject,
-  username: signedInUser.username,
-  email: signedInUser.email,
-  name: signedInUser.name,
-  roles: signedInUser.roles,
-};
+const tasks = await client.searchTasks({
+  candidateUser: signedInUser.email,
+  candidateGroups: signedInUser.groups,
+  includeUnassigned: true,
+});
 
-const inbox = await client.listInboxItems({ actingUser });
-const current = await client.getInboxInstance(inbox[0].id, { actingUser, includeCompleted: true });
-const tasks = await client.listUserTasks(current.id, { actingUser });
-await client.claimUserTask(current.id, tasks[0].executionId, { actingUser });
-await client.completeUserTask(current.id, tasks[0].executionId, { actingUser });
-const history = await client.listMyCompletedTransactions({ actingUser, limit: 50 });
+const task = tasks[0];
+await client.claimUserTask(task.processInstanceKey, task.executionId, signedInUser.email);
+await client.completeUserTask(task.processInstanceKey, task.executionId, signedInUser.email);
 ```
 
-Inbox methods require an `artificialflow client` SDK token plus acting-user details. Do not expose the SDK token to the browser.
+`assignee`, `candidateUser` and `candidateGroups` are OR-combined. `state` is
+`active` (default), `completed` or `all`. Client tokens must pass the assignee
+on claim and complete; completing requires the same assignee that claimed the
+task. Do not expose the SDK token to the browser.
 
 ## Standalone smoke test
 
@@ -191,22 +140,16 @@ npm install
 npm run build
 ```
 
-Required input (set exactly one authentication option):
+Required input (set at most one authentication option; none with `IAM_DEPLOYMENT_MODE=false`):
 
 - `ARTIFICIALFLOW_BASE_URL`
   - ArtificialFlow gateway API URL.
   - Local default: `http://localhost:9100/api`
 - `ARTIFICIALFLOW_TOKEN`
-  - Raw token text with the `artificialflow client` role; never prefix it with `Bearer `.
-  - Bundled ZITADEL: use only for an existing legacy client during migration.
-  - External IAM: issue it from your provider service-account/client-credentials app.
-- `ARTIFICIALFLOW_ZITADEL_PROFILE_FILE`
-  - Path to a ZITADEL service-account profile downloaded from **SDK Clients**.
-  - Do not print the file contents or commit the file.
-
-For one transition release, the smoke helper falls back to `ARTIFICIALFLOW_BASE_URL`,
-`ARTIFICIALFLOW_API_URL`, and the corresponding legacy `ARTIFICIALFLOW_*` inputs only when the
-canonical value is empty.
+  - Raw token text with the `artificialflowclient` role; never prefix it with `Bearer `.
+  - Issue it from your provider's client-credentials application.
+- `OIDC_TOKEN_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
+  - Alternative to `ARTIFICIALFLOW_TOKEN`. The smoke test exchanges them for an access token.
 
 Optional inputs:
 
@@ -221,26 +164,22 @@ Optional inputs:
 - `ARTIFICIALFLOW_WORKER_JOB_TYPE`
   - Service-task job type to activate and complete once.
 
-Run the minimal smoke test:
-
 ```bash
-export ARTIFICIALFLOW_ZITADEL_PROFILE_FILE="/run/secrets/artificialflow-sdk-profile.json"
+export ARTIFICIALFLOW_TOKEN="<access-token>"
 node examples/sdk-smoke-test.js
-unset ARTIFICIALFLOW_ZITADEL_PROFILE_FILE
 ```
 
 Run with workflow start, message publish, and one worker activation:
 
 ```bash
-export ARTIFICIALFLOW_ZITADEL_PROFILE_FILE="/run/secrets/artificialflow-sdk-profile.json"
 ARTIFICIALFLOW_BASE_URL="http://localhost:9100/api" \
+ARTIFICIALFLOW_TOKEN="<access-token>" \
 ARTIFICIALFLOW_WORKFLOW_KEY="order-process" \
 ARTIFICIALFLOW_BUSINESS_KEY="order-123" \
 ARTIFICIALFLOW_MESSAGE_NAME="MsgOrderPlaced" \
 ARTIFICIALFLOW_MESSAGE_CORRELATION_KEY="order-123" \
 ARTIFICIALFLOW_WORKER_JOB_TYPE="payment-service" \
 node examples/sdk-smoke-test.js
-unset ARTIFICIALFLOW_ZITADEL_PROFILE_FILE
 ```
 
 ## Worker
@@ -259,11 +198,14 @@ process.on('SIGINT', () => worker.stop());
 ## API coverage
 
 - Workflow deploy/list/search/get/delete
-- Instance start/list/search/get/update variables/complete task/delete
-- Human task inbox list/detail/history/claim/complete
-- Signal and message publish
-- Job activation, completion, failure, lock extension, capabilities
-- Engine metrics
+- Decision-table deploy/list/evaluate
+- Instance start/list/search/get/update variables/complete step/delete
+- Bounded instance migration dry-run and apply (admin)
+- User task search/claim/complete
+- Message, signal, and escalation publish
+- Job activation, listing, completion, failure, lock extension, administrative retry, capabilities
+- Incident listing and administrative resolution, with the response wrapper normalized to an array
+- Engine metrics (command service directly; the gateway does not route `/internal/metrics`)
 - Identity config and current principal
-- Bundled ZITADEL identity user/role and legacy client-token management
-  (legacy token creation and rotation may be disabled by policy)
+
+Full guide: [docs/sdk-nodejs.md](../../docs/sdk-nodejs.md).

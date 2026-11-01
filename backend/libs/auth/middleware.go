@@ -1,9 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -30,6 +34,8 @@ func NewDynamicMiddleware(ctx context.Context, provider ConfigProvider, publicPa
 	}
 	paths := map[string]struct{}{
 		"/health": {},
+		"/livez":  {},
+		"/readyz": {},
 	}
 	for _, path := range publicPaths {
 		trimmed := strings.TrimSpace(path)
@@ -47,6 +53,9 @@ func NewDynamicMiddleware(ctx context.Context, provider ConfigProvider, publicPa
 	if err != nil {
 		return nil, err
 	}
+	if err := initialConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid authentication configuration: %w", err)
+	}
 	if initialConfig.Enabled() {
 		verifier, err := m.buildVerifier(ctx, initialConfig)
 		if err != nil {
@@ -61,19 +70,29 @@ func NewDynamicMiddleware(ctx context.Context, provider ConfigProvider, publicPa
 // Handler verifies the Bearer token and adds claims to the context
 func (m *Middleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := m.publicPaths[r.URL.Path]; ok {
+		publicPath := r.URL.Path
+		if strings.HasPrefix(publicPath, "/v1/") {
+			publicPath = strings.TrimPrefix(publicPath, "/v1")
+		}
+		if _, ok := m.publicPaths[publicPath]; ok {
 			next.ServeHTTP(w, r)
 			return
 		}
-
 		cfg, err := m.provider.GetConfig(r.Context())
 		if err != nil {
 			m.logger.Error(r.Context(), "failed to resolve auth configuration", map[string]any{"error": err.Error()})
 			http.Error(w, "Authentication configuration unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		if err := cfg.Validate(); err != nil {
+			m.logger.Error(r.Context(), "invalid auth configuration", map[string]any{"error": err.Error()})
+			http.Error(w, "Authentication configuration unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		if !cfg.Enabled() {
-			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), disabledAuthPrincipal())))
+			principal := disabledAuthPrincipal()
+			principal.TenantID = DefaultTenantID
+			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principal)))
 			return
 		}
 		verifier, err := m.getVerifier(r.Context(), cfg)
@@ -96,6 +115,20 @@ func (m *Middleware) Handler(next http.Handler) http.Handler {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
+		if err := resolvePrincipalTenant(principal); err != nil {
+			http.Error(w, "Tenant claim required", http.StatusUnauthorized)
+			return
+		}
+		// X-Tenant-ID may be sent by older gateways as a consistency assertion,
+		// but it can never select a tenant.
+		if requested := strings.TrimSpace(r.Header.Get("X-Tenant-ID")); requested != "" && requested != principal.TenantID {
+			http.Error(w, "Tenant conflict", http.StatusBadRequest)
+			return
+		}
+		if requestTenantConflict(r, principal.TenantID) {
+			http.Error(w, "Tenant conflict", http.StatusBadRequest)
+			return
+		}
 
 		// Add claims to context
 		ctx := WithPrincipal(r.Context(), *principal)
@@ -107,11 +140,66 @@ func (m *Middleware) Handler(next http.Handler) http.Handler {
 	})
 }
 
+func requestTenantConflict(r *http.Request, trustedTenant string) bool {
+	for _, key := range []string{"tenant_id", "tenantId"} {
+		if requested := strings.TrimSpace(r.URL.Query().Get(key)); requested != "" && requested != trustedTenant {
+			return true
+		}
+	}
+	if r.Body == nil || !strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+		return false
+	}
+	const inspectLimit = int64(20 << 20)
+	body, err := io.ReadAll(io.LimitReader(r.Body, inspectLimit+1))
+	if err != nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		return false
+	}
+	if int64(len(body)) > inspectLimit {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil {
+		return false
+	}
+	for _, key := range []string{"tenant_id", "tenantId"} {
+		raw, ok := object[key]
+		if !ok {
+			continue
+		}
+		var requested string
+		if json.Unmarshal(raw, &requested) == nil {
+			requested = strings.TrimSpace(requested)
+			if requested != "" && requested != trustedTenant {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func resolvePrincipalTenant(principal *Principal) error {
+	if principal == nil {
+		return fmt.Errorf("principal is required")
+	}
+	principal.TenantID = strings.TrimSpace(principal.TenantID)
+	if principal.TenantID == "" {
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("TENANT_MODE")), "strict") {
+			return fmt.Errorf("tenant claim required")
+		}
+		principal.TenantID = DefaultTenantID
+	}
+	return nil
+}
+
 func disabledAuthPrincipal() Principal {
 	return Principal{
 		Subject:   "local-disabled-auth",
-		Roles:     StandardRoles(),
+		Roles:     []string{RoleAdmin},
 		TokenMode: "disabled",
+		TenantID:  DefaultTenantID,
 	}
 }
 
@@ -160,10 +248,11 @@ func configFingerprint(cfg Config) string {
 		strings.TrimSpace(cfg.IntrospectionAuthMethod),
 		strings.TrimSpace(cfg.ClaimSubjectPath),
 		strings.TrimSpace(cfg.ClaimRolesPath),
-		strings.TrimSpace(cfg.ClaimScopesPath),
 		strings.TrimSpace(cfg.ClaimTenantPath),
 		strings.TrimSpace(cfg.ClaimEmailPath),
 		strings.TrimSpace(cfg.ClaimNamePath),
+		strings.Join(cfg.AllowedAlgorithms, ","),
+		cfg.HTTPTimeout.String(),
 	}
 	if cfg.EnforceAudience {
 		parts = append(parts, "audience:on")
@@ -174,6 +263,9 @@ func configFingerprint(cfg Config) string {
 		parts = append(parts, "issuer:insecure")
 	} else {
 		parts = append(parts, "issuer:strict")
+	}
+	if cfg.Production {
+		parts = append(parts, "production")
 	}
 	return strings.Join(parts, "|")
 }

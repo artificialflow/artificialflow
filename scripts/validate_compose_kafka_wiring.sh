@@ -20,7 +20,6 @@ with open(json_path, "r", encoding="utf-8") as handle:
     data = json.load(handle)
 services = data.get("services", {})
 required = {
-    "EVENT_BUS_TYPE": "kafka",
     "KAFKA_BROKERS": "kafka:29092",
     "KAFKA_TOPIC_EVENTS": "workflow.events.v1",
 }

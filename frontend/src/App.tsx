@@ -1,9 +1,11 @@
-import { lazy, Suspense, useEffect, useLayoutEffect } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router";
 import { useAuth } from "react-oidc-context";
 import { setAccessToken } from "@/lib/api";
 import DashboardLayout from "@/layouts/DashboardLayout";
 import { Loader2 } from "lucide-react";
+import { RUNTIME_UI_CAPABILITIES } from "@/lib/runtime-capabilities";
+import ConsoleLogin from "@/components/ConsoleLogin";
 
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const Modeler = lazy(() => import("@/pages/Modeler"));
@@ -11,17 +13,11 @@ const Processes = lazy(() => import("@/pages/Processes"));
 const Instances = lazy(() => import("@/pages/Instances"));
 const InstanceDetails = lazy(() => import("@/pages/InstanceDetails"));
 const History = lazy(() => import("@/pages/History"));
-const TaskInbox = lazy(() => import("@/pages/TaskInbox"));
-const IdentityManagement = lazy(() => import("@/pages/IdentityManagement"));
-const ArtificialFlowClients = lazy(() => import("@/pages/ArtificialFlowClients"));
+const Analytics = lazy(() => import("@/pages/Analytics"));
+const Identity = lazy(() => import("@/pages/Identity"));
 
-// Decisions/DMN UI is implemented but hidden until the next release train.
-const SHOW_DECISIONS_UI = false;
-const Decisions = SHOW_DECISIONS_UI ? lazy(() => import("@/pages/Decisions")) : null;
-
-// Incidents UI is implemented but hidden in the frontend; API remains available.
-const SHOW_INCIDENTS_UI = false;
-const Incidents = SHOW_INCIDENTS_UI ? lazy(() => import("@/pages/Incidents")) : null;
+const Decisions = lazy(() => import("@/pages/Decisions"));
+const Incidents = lazy(() => import("@/pages/Incidents"));
 
 type AppProps = {
   authDisabled?: boolean;
@@ -48,18 +44,17 @@ function AppRoutes({ onLogout }: AppRoutesProps) {
             <Route index element={<Dashboard />} />
             <Route path="modeler" element={<Modeler />} />
             <Route path="processes" element={<Processes />} />
-            {SHOW_DECISIONS_UI && Decisions ? (
+            {RUNTIME_UI_CAPABILITIES.decisions ? (
               <Route path="decisions" element={<Decisions />} />
             ) : null}
             <Route path="instances" element={<Instances />} />
             <Route path="instances/:id" element={<InstanceDetails />} />
-            {SHOW_INCIDENTS_UI && Incidents ? (
+            {RUNTIME_UI_CAPABILITIES.incidents ? (
               <Route path="incidents" element={<Incidents />} />
             ) : null}
             <Route path="history" element={<History />} />
-            <Route path="inbox" element={<TaskInbox />} />
-            <Route path="identity" element={<IdentityManagement />} />
-            <Route path="sdk-clients" element={<ArtificialFlowClients />} />
+            <Route path="analytics" element={<Analytics />} />
+            <Route path="identity" element={<Identity />} />
           </Route>
         </Routes>
       </Suspense>
@@ -144,12 +139,32 @@ function AuthenticatedApp() {
   return <LoadingScreen />;
 }
 
+const CONSOLE_SESSION_KEY = "artificialflow.console-session";
+
 function AuthDisabledApp() {
+  const [signedIn, setSignedIn] = useState(() => window.sessionStorage.getItem(CONSOLE_SESSION_KEY) !== null);
+
   useEffect(() => {
     setAccessToken(null);
   }, []);
 
-  return <AppRoutes />;
+  if (!signedIn) {
+    return (
+      <ConsoleLogin
+        onSignedIn={(principal) => {
+          window.sessionStorage.setItem(CONSOLE_SESSION_KEY, principal.subject);
+          setSignedIn(true);
+        }}
+      />
+    );
+  }
+
+  const logout = () => {
+    window.sessionStorage.removeItem(CONSOLE_SESSION_KEY);
+    setSignedIn(false);
+  };
+
+  return <AppRoutes onLogout={logout} />;
 }
 
 function App({ authDisabled = false }: AppProps) {

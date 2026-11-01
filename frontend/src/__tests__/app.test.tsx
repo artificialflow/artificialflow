@@ -60,11 +60,6 @@ describe("Environment config", () => {
     expect(base).toBeTruthy();
     expect(base).toContain("8080");
   });
-
-  it("OIDC authority has a default", () => {
-    const authority = import.meta.env.VITE_OIDC_AUTHORITY || "http://localhost:8080";
-    expect(authority).toBeTruthy();
-  });
 });
 
 // ── pure logic: status badge mapping ──────────────────────────────────────

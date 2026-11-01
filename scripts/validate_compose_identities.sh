@@ -9,27 +9,19 @@ trap 'rm -f "${tmp_json}"' EXIT
 
 validate_config() {
   local identity="$1"
-  local compose_file="$2"
-  local release_overlay="$3"
-  local expected_project="$4"
-  local expected_registry="$5"
-  local expected_volumes="$6"
-  shift 6
+  local expected_project="$2"
+  local expected_registry="$3"
+  local expected_volumes="$4"
+  local expected_iam_mode="$5"
+  shift 5
 
-  local -a compose_args=(-f "${compose_file}")
-  if [[ "${release_overlay}" == "true" ]]; then
-    compose_args+=(-f docker-compose.release.yml)
-  fi
-  if [[ "${compose_file}" == "docker-compose.yml" ]]; then
-    compose_args+=(--profile full-cqrs)
-  fi
-
-  env "$@" docker compose "${compose_args[@]}" config --format json > "${tmp_json}"
-  python3 - "${tmp_json}" "${identity}" "${expected_project}" "${expected_registry}" "${expected_volumes}" <<'PY'
+  env -u IAM_DEPLOYMENT_MODE -u CONSOLE_ADMIN_USERNAME -u CONSOLE_ADMIN_PASSWORD "$@" \
+    docker compose --env-file /dev/null config --format json > "${tmp_json}"
+  python3 - "${tmp_json}" "${identity}" "${expected_project}" "${expected_registry}" "${expected_volumes}" "${expected_iam_mode}" <<'PY'
 import json
 import sys
 
-path, identity, expected_project, expected_registry, raw_volumes = sys.argv[1:]
+path, identity, expected_project, expected_registry, raw_volumes, expected_iam_mode = sys.argv[1:]
 with open(path, "r", encoding="utf-8") as handle:
     config = json.load(handle)
 
@@ -41,19 +33,41 @@ for service_name, service in config.get("services", {}).items():
     if service.get("container_name"):
         errors.append(f"{service_name} hard-codes container_name={service['container_name']!r}")
 
-if expected_registry != "-":
-    expected_images = {
-        "app": "workflow-command",
-        "workflow-runtime": "workflow-runtime",
-        "workflow-query": "workflow-query",
-        "sync-worker": "sync-worker",
-        "frontend": "frontend",
-    }
-    for service_name, image_name in expected_images.items():
-        actual = config.get("services", {}).get(service_name, {}).get("image")
-        prefix = f"{expected_registry}/{image_name}:"
-        if not str(actual).startswith(prefix):
-            errors.append(f"{service_name} image {actual!r}, expected prefix {prefix!r}")
+required = ["postgres", "elasticsearch", "kafka", "connect", "app", "workflow-runtime", "workflow-query", "sync-worker", "frontend", "gateway"]
+missing = [name for name in required if name not in config.get("services", {})]
+if missing:
+    errors.append(f"missing services: {missing}")
+
+expected_images = {
+    "app": "workflow-command",
+    "workflow-runtime": "workflow-runtime",
+    "workflow-query": "workflow-query",
+    "sync-worker": "sync-worker",
+    "frontend": "frontend",
+}
+for service_name, image_name in expected_images.items():
+    actual = config.get("services", {}).get(service_name, {}).get("image")
+    prefix = f"{expected_registry}/{image_name}:"
+    if not str(actual).startswith(prefix):
+        errors.append(f"{service_name} image {actual!r}, expected prefix {prefix!r}")
+
+iam_modes = {
+    name: (config.get("services", {}).get(name, {}).get("environment") or {}).get("IAM_DEPLOYMENT_MODE")
+    for name in ("app", "workflow-query", "frontend")
+}
+if None in iam_modes.values() or len(set(iam_modes.values())) != 1:
+    errors.append(f"IAM_DEPLOYMENT_MODE must be set identically on app, workflow-query and frontend: {iam_modes}")
+if any(mode not in ("true", "false") for mode in iam_modes.values() if mode):
+    errors.append(f"IAM_DEPLOYMENT_MODE must be true or false: {iam_modes}")
+if set(iam_modes.values()) != {expected_iam_mode}:
+    errors.append(f"IAM_DEPLOYMENT_MODE {iam_modes}, expected {expected_iam_mode!r}")
+
+console_keys = ("CONSOLE_ADMIN_USERNAME", "CONSOLE_ADMIN_PASSWORD")
+for service_name, service in config.get("services", {}).items():
+    present = [key for key in console_keys if key in (service.get("environment") or {})]
+    wanted = list(console_keys) if expected_iam_mode == "false" and service_name == "app" else []
+    if present != wanted:
+        errors.append(f"{service_name} console credentials {present}, expected {wanted} when IAM_DEPLOYMENT_MODE={expected_iam_mode}")
 
 expected_volumes = {}
 for item in filter(None, raw_volumes.split(",")):
@@ -79,27 +93,17 @@ canonical_env=(
   ARTIFICIALFLOW_COMPOSE_PROJECT_NAME=artificialflow
   ARTIFICIALFLOW_PGDATA_VOLUME=artificialflow-postgres-data
   ARTIFICIALFLOW_ESDATA_VOLUME=artificialflow-elasticsearch-data
-  ARTIFICIALFLOW_ZITADEL_PGDATA_VOLUME=artificialflow-zitadel-postgres-data
-  ARTIFICIALFLOW_ZITADEL_BOOTSTRAP_VOLUME=artificialflow-zitadel-system-bootstrap
-  ARTIFICIALFLOW_BOOTSTRAP_VOLUME=artificialflow-zitadel-bootstrap
-  ARTIFICIALFLOW_AUTH_VOLUME=artificialflow-zitadel-auth
-  ARTIFICIALFLOW_ZITADEL_NETWORK=artificialflow-zitadel
   ARTIFICIALFLOW_IMAGE_REGISTRY=artificialflow
 )
 
+volumes="pgdata=artificialflow-postgres-data,esdata=artificialflow-elasticsearch-data"
 
-base_volumes="pgdata=artificialflow-postgres-data,esdata=artificialflow-elasticsearch-data"
-zitadel_volumes="${base_volumes},zitadel-postgres-data=artificialflow-zitadel-postgres-data,zitadel-bootstrap=artificialflow-zitadel-system-bootstrap,application-bootstrap=artificialflow-zitadel-bootstrap,application-auth=artificialflow-zitadel-auth"
-
-for release_overlay in false true; do
-  canonical_registry="-"
-  if [[ "${release_overlay}" == "true" ]]; then
-    canonical_registry=artificialflow
-  fi
-
-  validate_config "canonical base release=${release_overlay}" docker-compose.yml "${release_overlay}" artificialflow "${canonical_registry}" "${base_volumes}" "${canonical_env[@]}"
-  validate_config "canonical external release=${release_overlay}" docker-compose.external-iam.yml "${release_overlay}" artificialflow "${canonical_registry}" "${base_volumes}" "${canonical_env[@]}"
-  validate_config "canonical zitadel release=${release_overlay}" docker-compose.zitadel.yml "${release_overlay}" artificialflow "${canonical_registry}" "${zitadel_volumes}" "${canonical_env[@]}"
-done
+validate_config "canonical compose (default, no IAM)" artificialflow artificialflow "${volumes}" false \
+  "${canonical_env[@]}"
+validate_config "canonical compose (IAM_DEPLOYMENT_MODE=false)" artificialflow artificialflow "${volumes}" false \
+  "${canonical_env[@]}" IAM_DEPLOYMENT_MODE=false
+validate_config "canonical compose (IAM_DEPLOYMENT_MODE=true)" artificialflow artificialflow "${volumes}" true \
+  "${canonical_env[@]}" IAM_DEPLOYMENT_MODE=true \
+  AUTH_ISSUER_INTERNAL_URL=https://login.example.com AUTH_ISSUER_PUBLIC_URL=https://login.example.com
 
 echo "compose identity validation passed"

@@ -25,4 +25,12 @@ Worker(
 ).run()
 ```
 
-Requires Python 3.10+.
+`token` is a raw access token with the `artificialflowclient` role when the
+deployment runs with `IAM_DEPLOYMENT_MODE=true`. With `IAM_DEPLOYMENT_MODE=false`
+(no IAM provider) the API ignores the header, so pass `token=""`.
+
+This package covers the worker protocol only. For workflow, instance, and
+user-task calls use the [HTTP API](../../docs/API.md) or the Node.js, .NET, or
+Java SDK.
+
+Requires Python 3.10+. Full guide: [docs/sdk-python.md](../../docs/sdk-python.md).

@@ -28,6 +28,10 @@ type connectorBootstrapOptions struct {
 	ConnectorTopicPrefix     string
 	ConnectorSlotName        string
 	ConnectorDatabaseUser    string
+	ConnectorDatabaseHost    string
+	ConnectorDatabasePort    string
+	ConnectorDatabaseName    string
+	ConnectorDatabasePass    string
 	WaitTimeout              time.Duration
 	PollInterval             time.Duration
 	BlockedConnectorNames    []string
@@ -201,9 +205,13 @@ func buildConnectorCreateRequest(opts connectorBootstrapOptions) (connectorCreat
 
 func applyConnectorConfigOverrides(config map[string]any, opts connectorBootstrapOptions) {
 	for key, value := range map[string]string{
-		"topic.prefix":  opts.ConnectorTopicPrefix,
-		"slot.name":     opts.ConnectorSlotName,
-		"database.user": opts.ConnectorDatabaseUser,
+		"topic.prefix":      opts.ConnectorTopicPrefix,
+		"slot.name":         opts.ConnectorSlotName,
+		"database.user":     opts.ConnectorDatabaseUser,
+		"database.hostname": opts.ConnectorDatabaseHost,
+		"database.port":     opts.ConnectorDatabasePort,
+		"database.dbname":   opts.ConnectorDatabaseName,
+		"database.password": opts.ConnectorDatabasePass,
 	} {
 		if value = strings.TrimSpace(value); value != "" {
 			config[key] = value

@@ -5,28 +5,35 @@ import (
 	"strings"
 )
 
+// Roles are assigned in the customer's OIDC provider and are the complete
+// authorization model. Matching is case-insensitive; no other spellings are
+// accepted.
 const (
-	RoleArtificialFlowAdmin   = "artificialflow admin"
-	RoleArtificialFlowModeler = "artificialflow modeler"
-	RoleArtificialFlowClient  = "artificialflow client"
+	// RoleAdmin has full access to the console and every API operation.
+	RoleAdmin = "artificialflowadmin"
+	// RoleBusiness deploys, views and updates workflow and decision models.
+	// It cannot see runtime instance data or perform operational actions.
+	RoleBusiness = "artificialflowbusiness"
+	// RoleClient is assigned to SDK/API service accounts that run workflows,
+	// workers and task applications.
+	RoleClient = "artificialflowclient"
+	// RoleAnalytics is reserved for analytics features and currently grants
+	// console sign-in only.
+	RoleAnalytics = "artificialflowanalytics"
 )
 
 func StandardRoles() []string {
-	return []string{RoleArtificialFlowAdmin, RoleArtificialFlowModeler, RoleArtificialFlowClient}
+	return []string{RoleAdmin, RoleBusiness, RoleClient, RoleAnalytics}
 }
 
 func CanonicalRole(role string) string {
 	trimmed := strings.TrimSpace(role)
-	switch {
-	case strings.EqualFold(trimmed, RoleArtificialFlowAdmin):
-		return RoleArtificialFlowAdmin
-	case strings.EqualFold(trimmed, RoleArtificialFlowModeler):
-		return RoleArtificialFlowModeler
-	case strings.EqualFold(trimmed, RoleArtificialFlowClient):
-		return RoleArtificialFlowClient
-	default:
-		return trimmed
+	for _, standard := range StandardRoles() {
+		if strings.EqualFold(trimmed, standard) {
+			return standard
+		}
 	}
+	return trimmed
 }
 
 func CanonicalizeRoles(roles []string) []string {

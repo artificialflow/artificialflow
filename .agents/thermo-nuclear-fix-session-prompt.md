@@ -116,7 +116,7 @@ Use narrower checks for focused fixes when possible, then broaden if the change 
 
 - Backend workflow command API, engine, BPMN parser, navigation, jobs, events, and persistence.
 - Auth/IAM libraries, role mapping, identity management, OIDC runtime config.
-- CQRS/outbox/idempotency, sync worker, Kafka/NATS, Debezium, Elasticsearch/OpenSearch.
+- CQRS/outbox/idempotency, sync worker, Kafka, Debezium, Elasticsearch/OpenSearch.
 - Frontend app shell, auth flow, dashboard, modeler, process/instance views, identity/client management.
 - Node SDK client and gRPC/protobuf contracts.
 - Dockerfiles, compose profiles, Helm chart, GitHub Actions release/security workflows, release scripts.

@@ -2,7 +2,7 @@
 
 Public Go worker library for ArtificialFlow external jobs (`github.com/artificialflow/artificialflow/backend/libs/worker`).
 
-Sample binary: [`examples/go-worker`](../../../examples/go-worker).
+Sample binary: [`examples/go-worker`](../../../examples/go-worker). Guide: [docs/sdk-go.md](../../../docs/sdk-go.md).
 
 Minimal external worker SDK for ADR-0006.
 
@@ -38,6 +38,7 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"time"
 
 	"github.com/artificialflow/artificialflow/backend/libs/model"
@@ -46,7 +47,10 @@ import (
 
 func main() {
 	client, err := worker.NewClient(worker.ClientConfig{
-		BaseURL: "http://localhost:8080",
+		BaseURL: "http://localhost:9100/api",
+		// Required only with IAM_DEPLOYMENT_MODE=true: a raw access token
+		// with the artificialflowclient role.
+		BearerToken: os.Getenv("ARTIFICIALFLOW_TOKEN"),
 	})
 	if err != nil {
 		log.Fatal(err)

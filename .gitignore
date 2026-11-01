@@ -20,14 +20,14 @@ vendor/
 # Frontend and SDK generated artifacts
 frontend/dist/
 clients/nodejs-sdk/dist/
+clients/java-sdk/target/
+clients/dotnet-sdk/**/bin/
+clients/dotnet-sdk/**/obj/
 *.tsbuildinfo
 
 # Environment files and local secrets
 .env
 .env.*
-!.env.example
-!.env.core.example
-!.env.full.example
 *.pem
 *.key
 *.crt

@@ -12,7 +12,7 @@ Review:
 
 ## Common Actions
 
-- If publish lag grows, inspect event bus connectivity and command service logs.
+- If publish lag grows, inspect Kafka/Debezium Connect connectivity and command service logs.
 - If terminal failed records appear, review payloads and downstream broker errors.
 - If idempotency storage grows unexpectedly, verify cleanup configuration and retention.
 

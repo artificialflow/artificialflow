@@ -14,7 +14,7 @@ Assess whether an ArtificialFlow release candidate has enough evidence to publis
 ## Tools And Evidence To Inspect
 
 - `make release-dry-run` output.
-- `make smoke-profiles`, `make smoke-release-profiles`, and `make validate-helm` output.
+- `make smoke`, `make smoke-release`, and `make validate-helm` output.
 - Node SDK test/package/SBOM evidence.
 - Docker build, scan, SBOM/provenance, and signing evidence.
 - Security workflow results and unresolved dependency alerts.

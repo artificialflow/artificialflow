@@ -14,6 +14,7 @@ import (
 type MockRepository struct {
 	repository.Repository
 	createdIncidents []*model.Incident
+	createdJobs      []*model.Job
 }
 
 func (m *MockRepository) CreateIncident(ctx context.Context, incident *model.Incident) error {
@@ -31,7 +32,10 @@ func (m *MockRepository) UpdateElementInstance(ctx context.Context, element *mod
 func (m *MockRepository) GetJob(ctx context.Context, key int64) (*model.Job, error) {
 	return nil, errors.New("not found")
 }
-func (m *MockRepository) CreateJob(ctx context.Context, job *model.Job) error { return nil }
+func (m *MockRepository) CreateJob(ctx context.Context, job *model.Job) error {
+	m.createdJobs = append(m.createdJobs, job)
+	return nil
+}
 func (m *MockRepository) UpdateJob(ctx context.Context, job *model.Job) error { return nil }
 
 // Add more if needed by ScriptTaskExecutor. Wait, it calls persistVariables?
@@ -106,6 +110,33 @@ func TestScriptTaskExecutorCreatesIncidentOnFailure(t *testing.T) {
 	}
 	if incident.ElementInstanceKey != 100 {
 		t.Errorf("expected ElementInstanceKey 100, got %d", incident.ElementInstanceKey)
+	}
+}
+
+func TestServiceTaskExecutorPublishesJobCreated(t *testing.T) {
+	mockRepo := &MockRepository{}
+	publisher := &capturedPublisher{}
+	engine := NewEngine(mockRepo, publisher)
+	executor := &ServiceTaskExecutor{}
+	step := &model.StepDefinition{
+		ID: "service_step", Type: model.StepTypeServiceTask, Implementation: "external-work",
+	}
+	instance := &model.WorkflowInstance{
+		ID: "123",
+		Executions: []model.Execution{{
+			ID: "exec_1", StepID: step.ID, Status: "ACTIVE", ElementInstanceKey: 100,
+		}},
+		Context: map[string]any{},
+	}
+
+	if err := executor.Execute(context.Background(), engine, instance, step, "exec_1", &model.WorkflowDefinition{ID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mockRepo.createdJobs) != 1 {
+		t.Fatalf("created jobs = %d, want 1", len(mockRepo.createdJobs))
+	}
+	if len(publisher.events) != 1 || publisher.events[0] != "JobCreated" {
+		t.Fatalf("published events = %v, want [JobCreated]", publisher.events)
 	}
 }
 

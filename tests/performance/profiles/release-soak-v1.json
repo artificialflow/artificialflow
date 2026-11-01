@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "profileId": "AF-SOAK-001",
+  "description": "Reproducible unchanged-digest release soak",
+  "topology": {
+    "kubernetesNodes": 3,
+    "commandReplicas": 2,
+    "runtimeReplicas": 3,
+    "queryReplicas": 2,
+    "syncWorkerReplicas": 2,
+    "postgres": "17.2-alpine",
+    "kafkaPartitions": 3
+  },
+  "dataset": {
+    "fixture": "tests/e2e/fixtures/mega-process.bpmn",
+    "definitions": 1,
+    "preloadedInstances": 1000,
+    "tenantCount": 4
+  },
+  "traffic": {
+    "duration": "4h",
+    "warmup": "15m",
+    "workflowStartsPerSecond": 20,
+    "queryReadsPerSecond": 50,
+    "workerActivationsPerSecond": 20
+  },
+  "resources": {
+    "command": {"cpu": "1000m", "memory": "1Gi"},
+    "runtime": {"cpu": "1000m", "memory": "1Gi"},
+    "query": {"cpu": "1000m", "memory": "1Gi"},
+    "syncWorker": {"cpu": "500m", "memory": "512Mi"}
+  },
+  "sampling": {
+    "interval": "30s",
+    "minimumSamples": 480,
+    "minimumRequests": 100000
+  },
+  "thresholds": {
+    "httpFailureRateMax": 0.001,
+    "httpP99MillisecondsMax": 250,
+    "checkPassRateMin": 0.99,
+    "outboxLagP99SecondsMax": 10,
+    "projectionLagP99SecondsMax": 5,
+    "podRestartDeltaMax": 0
+  },
+  "invariants": {
+    "candidateDigestsMayChange": false,
+    "functionalSuitesAfterSoak": 2,
+    "allowSkippedChecks": false
+  }
+}

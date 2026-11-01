@@ -10,11 +10,6 @@ required_headers=(
   "X-Correlation-ID"
   "Idempotency-Key"
   "X-Workflow-Worker-Protocol-Version"
-  "X-ArtificialFlow-Acting-Subject"
-  "X-ArtificialFlow-Acting-Username"
-  "X-ArtificialFlow-Acting-Email"
-  "X-ArtificialFlow-Acting-Name"
-  "X-ArtificialFlow-Acting-Roles"
 )
 
 allow_headers_line="$(

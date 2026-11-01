@@ -1,0 +1,13 @@
+# Reference single-region production topology. Layer this after your OIDC
+# values and before environment-specific secrets, endpoints, resources, and
+# immutable image digests.
+replicaCount: {command: 2, query: 2, runtime: 3, syncWorker: 2, frontend: 2, gateway: 2}
+
+runtime:
+  schedulerMode: multi-active
+  env:
+    OUTBOX_RELAY_INTERVAL: 10ms
+    OUTBOX_RELAY_BATCH_SIZE: "1000"
+
+monitoring:
+  enabled: true

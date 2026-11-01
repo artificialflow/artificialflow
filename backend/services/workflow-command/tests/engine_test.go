@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/application"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/infrastructure/messaging"
@@ -80,6 +81,20 @@ func TestDeployWorkflow(t *testing.T) {
 	}
 	if len(wf.Steps) != 2 {
 		t.Errorf("Expected 2 steps, got %d", len(wf.Steps))
+	}
+}
+
+func TestDeployWorkflowUsesContextTenant(t *testing.T) {
+	e := setupTestEngine(t)
+	ctx := auth.WithPrincipal(context.Background(), auth.Principal{TenantID: "tenant-a"})
+	wf, err := e.DeployWorkflow(ctx, "Tenant workflow", []model.StepDefinition{{
+		ID: "end", Type: model.StepTypeEnd,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.TenantID != "tenant-a" {
+		t.Fatalf("tenant = %q, want tenant-a", wf.TenantID)
 	}
 }
 

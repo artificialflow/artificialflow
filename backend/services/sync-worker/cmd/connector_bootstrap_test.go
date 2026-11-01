@@ -424,3 +424,27 @@ func TestBuildConnectorCreateRequest_AppliesPersistentIdentifierOverrides(t *tes
 		}
 	}
 }
+
+func TestBuildConnectorCreateRequest_AppliesDatabaseConnectionOverrides(t *testing.T) {
+	request, _, err := buildConnectorCreateRequest(connectorBootstrapOptions{
+		ConnectorName:         "artificialflow-postgres-connector",
+		ConnectorDatabaseHost: "release-artificialflow-postgresql",
+		ConnectorDatabasePort: "6432",
+		ConnectorDatabaseName: "workflow",
+		ConnectorDatabasePass: "s3cret",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	for key, want := range map[string]any{
+		"database.hostname": "release-artificialflow-postgresql",
+		"database.port":     "6432",
+		"database.dbname":   "workflow",
+		"database.password": "s3cret",
+		"database.user":     "artificialflow",
+	} {
+		if got := request.Config[key]; got != want {
+			t.Fatalf("expected %s=%q, got %#v", key, want, got)
+		}
+	}
+}

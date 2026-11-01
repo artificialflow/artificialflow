@@ -2,7 +2,9 @@
 
 Official connectors are external workers that implement a documented job type and payload contract. Prefer a few hardened connectors over a marketplace.
 
-Descriptor registry (shared schemas): `connectors/internal/common/descriptors.go` and `frontend/src/lib/connector-descriptors.ts`. The modeler Properties panel shows connector-specific fields when `taskType` matches a known job type; values are exported as `artificialflow:property` pairs and copied into instance variables at job creation (start variables with the same keys can supply or override them).
+The canonical descriptor registry is
+`connectors/internal/common/descriptors.json`; both the Go runtime and frontend
+modeler consume it directly.
 
 ## Starter set
 
@@ -14,15 +16,25 @@ Descriptor registry (shared schemas): `connectors/internal/common/descriptors.go
 | Slack/webhook | `io.artificialflow.connector.webhook` | Shipped (`connectors/webhook`) |
 | S3 | `io.artificialflow.connector.s3` | Shipped (`connectors/s3`) |
 
-Shared helpers live in `connectors/internal/common`.
+The shared runtime in `connectors/internal/common` owns activation, descriptor
+input validation, `secret://NAME` resolution, bounded execution retries,
+per-job idempotency, and metrics hooks. Connector packages only provide their
+transport adapter.
+
+Connector execution is at-least-once. The default in-memory idempotency store
+suppresses duplicate effects only within one connector process lifetime; it is
+not a durable exactly-once guarantee. Production destinations should accept a
+stable operation/idempotency key, or operators should provide a durable
+`IdempotencyStore`, before enabling retries for non-idempotent effects.
 
 ## Common env
 
 | Variable | Default | Notes |
 | :--- | :--- | :--- |
 | `ARTIFICIALFLOW_BASE_URL` | `http://localhost:9100/api` | Gateway API base |
-| `ARTIFICIALFLOW_TOKEN` | _(required)_ | Bearer token with job activate/complete |
+| `ARTIFICIALFLOW_TOKEN` | _(empty)_ | Raw access token with the `artificialflowclient` role. Required only with `IAM_DEPLOYMENT_MODE=true`. |
 | `WORKER_NAME` | per-connector default | Worker identity string |
+| `CONNECTOR_MAX_ATTEMPTS` | `1` | Adapter attempts, bounded to `1..3` |
 
 ## Security (HTTP / webhook)
 
@@ -39,7 +51,7 @@ Redirects re-check the allowlist. Header count/size is bounded.
 ## Run examples
 
 ```bash
-export ARTIFICIALFLOW_TOKEN=...
+export ARTIFICIALFLOW_TOKEN=...   # only with IAM_DEPLOYMENT_MODE=true
 
 # HTTP — see http/README.md (allowlist required unless ALLOW_ANY_HOST=true)
 HTTP_CONNECTOR_ALLOWED_HOSTS=api.example.com go run ./connectors/http

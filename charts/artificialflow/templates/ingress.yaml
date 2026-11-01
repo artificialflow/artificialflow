@@ -27,7 +27,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "artificialflow.gatewayServiceName" . }}
+                name: {{ include "artificialflow.fullname" . }}-gateway
                 port:
-                  number: {{ .Values.gateway.service.port }}
+                  number: 80
 {{- end }}

@@ -9,7 +9,7 @@ test.describe("Workflow API — lifecycle", () => {
     const res = await request.get(`${COMMAND_URL}/health`);
     expect(res.status()).toBe(200);
     const body = await res.json();
-    expect(body.status).toBe("ok");
+    expect(body.status).toBe("ready");
   });
 
   test("deploy workflow returns 200 with id", async ({ request }) => {

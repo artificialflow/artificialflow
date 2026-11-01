@@ -46,6 +46,15 @@ compose() {
   "${COMPOSE_CMD_ARGS[@]}" --profile full-cqrs "$@"
 }
 
+# apache/kafka ships admin tools as /opt/kafka/bin/*.sh. The short names from
+# older distributions are not on PATH, so the container can be healthy while
+# `kafka-topics` still fails.
+kafka_admin() {
+  local tool="$1"
+  shift
+  compose exec -T "${KAFKA_SERVICE}" "/opt/kafka/bin/${tool}.sh" "$@"
+}
+
 wait_for_http_200() {
   local url="$1"
   local started
@@ -319,7 +328,7 @@ wait_for_kafka_cli() {
   started="$(date +%s)"
 
   while true; do
-    if compose exec -T "${KAFKA_SERVICE}" kafka-topics --bootstrap-server "${KAFKA_BOOTSTRAP}" --list >/dev/null 2>&1; then
+    if kafka_admin kafka-topics --bootstrap-server "${KAFKA_BOOTSTRAP}" --list >/dev/null 2>&1; then
       return 0
     fi
 
@@ -352,7 +361,7 @@ ensure_sync_ready_topics() {
       continue
     fi
 
-    compose exec -T "${KAFKA_SERVICE}" kafka-topics \
+    kafka_admin kafka-topics \
       --bootstrap-server "${KAFKA_BOOTSTRAP}" \
       --create \
       --if-not-exists \
@@ -417,7 +426,7 @@ wait_for_postgres_captured_tables() {
 
 sync_consumer_group_ready() {
   local output
-  output="$(compose exec -T "${KAFKA_SERVICE}" kafka-consumer-groups \
+  output="$(kafka_admin kafka-consumer-groups \
     --bootstrap-server "${KAFKA_BOOTSTRAP}" \
     --describe \
     --group "${SYNC_GROUP_ID}" \
@@ -447,7 +456,7 @@ wait_for_sync_consumer_ready() {
     now="$(date +%s)"
     if (( now - started > WAIT_TIMEOUT_SEC )); then
       echo "Timed out waiting for sync-worker consumer group ${SYNC_GROUP_ID} readiness" >&2
-      compose exec -T "${KAFKA_SERVICE}" kafka-consumer-groups \
+      kafka_admin kafka-consumer-groups \
         --bootstrap-server "${KAFKA_BOOTSTRAP}" \
         --describe \
         --group "${SYNC_GROUP_ID}" \

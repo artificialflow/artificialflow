@@ -38,6 +38,7 @@ export default function Decisions() {
   const [evalId, setEvalId] = useState("");
   const [evalInputs, setEvalInputs] = useState('{"amount": 1500}');
   const [evalResult, setEvalResult] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,6 +58,7 @@ export default function Decisions() {
 
   const deploy = async () => {
     setSaving(true);
+    setActionError(null);
     try {
       JSON.parse(resource);
       await api.deployDecision({
@@ -67,7 +69,7 @@ export default function Decisions() {
       setOpen(false);
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Deploy failed");
+      setActionError(err instanceof Error ? err.message : "Deploy failed");
     } finally {
       setSaving(false);
     }
@@ -89,12 +91,13 @@ export default function Decisions() {
   };
 
   const evaluate = async () => {
+    setActionError(null);
     try {
       const inputs = JSON.parse(evalInputs) as Record<string, unknown>;
       const outputs = await api.evaluateDecision(evalId, inputs);
       setEvalResult(JSON.stringify(outputs, null, 2));
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Evaluate failed");
+      setActionError(err instanceof Error ? err.message : "Evaluate failed");
     }
   };
 
@@ -120,7 +123,7 @@ export default function Decisions() {
       </div>
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+        <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       )}
@@ -174,6 +177,7 @@ export default function Decisions() {
 
       <Modal isOpen={open} onClose={() => setOpen(false)} title="Upload decision table">
         <div className="space-y-4">
+          {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
           <div className="space-y-2">
             <Label htmlFor="decision-id">Decision ID</Label>
             <Input id="decision-id" value={decisionId} onChange={(e) => setDecisionId(e.target.value)} />
@@ -183,16 +187,16 @@ export default function Decisions() {
             <Input id="decision-name" value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="decision-file">JSON file</Label>
+            <Label htmlFor="decision-file">Decision table file</Label>
             <Input
               id="decision-file"
               type="file"
-              accept="application/json,.json"
+              accept="application/json,application/xml,text/xml,.json,.dmn,.xml"
               onChange={(e) => void onFile(e.target.files?.[0] || null)}
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="decision-resource">Decision JSON</Label>
+            <Label htmlFor="decision-resource">Decision JSON or DMN XML</Label>
             <Textarea
               id="decision-resource"
               className="font-mono h-56"
@@ -214,9 +218,10 @@ export default function Decisions() {
 
       <Modal isOpen={evalOpen} onClose={() => setEvalOpen(false)} title={`Evaluate ${evalId}`}>
         <div className="space-y-4">
+          {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
           <div className="space-y-2">
-            <Label>Inputs JSON</Label>
-            <Textarea className="font-mono h-32" value={evalInputs} onChange={(e) => setEvalInputs(e.target.value)} />
+            <Label htmlFor="decision-inputs">Inputs JSON</Label>
+            <Textarea id="decision-inputs" className="font-mono h-32" value={evalInputs} onChange={(e) => setEvalInputs(e.target.value)} />
           </div>
           <Button onClick={() => void evaluate()}>Run</Button>
           {evalResult && (

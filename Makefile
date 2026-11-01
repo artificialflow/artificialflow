@@ -1,58 +1,27 @@
-.PHONY: up up-external-iam up-zitadel up-external-iam-release up-zitadel-release down down-external-iam down-zitadel restart logs logs-external-iam logs-zitadel ps ps-external-iam ps-zitadel clean clean-external-iam clean-zitadel demo build-backend build-frontend up-core up-full up-full-cqrs smoke-base smoke-core smoke-full smoke-release-base smoke-release-core smoke-release-full smoke-release-profiles smoke-profiles validate-helm validate-legacy-branding validate-release-version validate-migration-release release-dry-run cqrs-parity-check cqrs-e2e-smoke worker-conformance validate-bpmn-capabilities test-bpmn-matrix test-bpmn-exhaustive test-deployment-matrix test-uat-videos test-uat-mega-bpmn test-unit test-integration test-e2e test-frontend test-perf test-security test-dast test-release-suite test-report test-all test-all-functionality
+.PHONY: up up-release down restart logs ps clean smoke smoke-release demo build-backend build-frontend sdk-dotnet sdk-java validate-helm validate-legacy-branding validate-release-version validate-migration-release test-schema-migrations test-recovery release-dry-run validate-release-evidence release-evidence-report kind-release-smoke release-chaos release-soak release-data-recovery post-soak-functional cqrs-parity-check cqrs-e2e-smoke worker-conformance validate-bpmn-capabilities test-bpmn-matrix test-bpmn-exhaustive test-deployment-matrix test-uat-videos test-uat-mega-bpmn test-unit test-integration test-e2e test-frontend test-perf test-security test-dast test-release-suite test-report test-all test-all-functionality quality-maintainability quality-coverage quality-race quality-fuzz quality-mutation quality-fast
 
 
 # Docker Compose Commands
+COMPOSE := docker compose
+
 up:
-	@$(MAKE) up-zitadel
+	$(COMPOSE) up -d --build
 
-up-external-iam:
-	docker compose -f docker-compose.external-iam.yml up -d --build
+up-release:
+	$(COMPOSE) pull
+	$(COMPOSE) up -d --no-build
 
-up-zitadel:
-	docker compose -f docker-compose.zitadel.yml up -d --build
-
-up-external-iam-release:
-	docker compose -f docker-compose.external-iam.yml -f docker-compose.release.yml up -d
-
-up-zitadel-release:
-	docker compose -f docker-compose.zitadel.yml -f docker-compose.release.yml up -d
-
-up-core:
-	@$(MAKE) up-zitadel
-
-up-full:
-	@$(MAKE) up-zitadel
-
-up-full-cqrs:
-	@$(MAKE) up-zitadel
-
-smoke-base:
-	docker compose -f docker-compose.yml config > /dev/null
+smoke:
+	$(COMPOSE) config > /dev/null
 	bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.yml
 
-smoke-core:
-	docker compose -f docker-compose.external-iam.yml config > /dev/null
-	bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.external-iam.yml
+smoke-release: smoke
 
-smoke-full:
-	docker compose -f docker-compose.zitadel.yml config > /dev/null
-	bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.zitadel.yml
+sdk-dotnet:
+	dotnet test clients/dotnet-sdk/ArtificialFlow.Sdk.sln
 
-smoke-profiles: smoke-base smoke-core smoke-full
-
-smoke-release-base:
-	docker compose -f docker-compose.yml -f docker-compose.release.yml config > /dev/null
-	bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.yml -f docker-compose.release.yml
-
-smoke-release-core:
-	docker compose -f docker-compose.external-iam.yml -f docker-compose.release.yml config > /dev/null
-	bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.external-iam.yml -f docker-compose.release.yml
-
-smoke-release-full:
-	docker compose -f docker-compose.zitadel.yml -f docker-compose.release.yml config > /dev/null
-	bash scripts/validate_compose_kafka_wiring.sh -f docker-compose.zitadel.yml -f docker-compose.release.yml
-
-smoke-release-profiles: smoke-release-base smoke-release-core smoke-release-full
+sdk-java:
+	mvn -B -f clients/java-sdk/pom.xml verify
 
 validate-helm:
 	bash scripts/validate_helm.sh
@@ -66,8 +35,35 @@ validate-release-version:
 validate-migration-release:
 	bash scripts/validate_migration_release.sh
 
+test-schema-migrations:
+	bash scripts/test_schema_migrations.sh
+
+test-recovery:
+	bash scripts/test_recovery.sh
+
 release-dry-run:
 	bash scripts/release_dry_run.sh
+
+validate-release-evidence:
+	python3 scripts/release/evidence.py validate-manifest
+
+release-evidence-report:
+	python3 scripts/release/evidence.py report
+
+kind-release-smoke:
+	bash scripts/release/kind_helm_smoke.sh
+
+release-chaos:
+	bash scripts/release/chaos.sh
+
+release-soak:
+	bash scripts/release/run_soak.sh
+
+release-data-recovery:
+	bash scripts/release/data_recovery_gate.sh
+
+post-soak-functional:
+	bash scripts/release/post_soak_functional.sh
 
 cqrs-parity-check:
 	./scripts/cqrs_parity_check.sh
@@ -82,44 +78,18 @@ init-connector:
 	./scripts/init_connector.sh
 
 down:
-	@$(MAKE) down-external-iam
-	@$(MAKE) down-zitadel
-
-down-external-iam:
-	docker compose -f docker-compose.external-iam.yml down
-
-down-zitadel:
-	docker compose -f docker-compose.zitadel.yml down
+	$(COMPOSE) down
 
 restart: down up
 
 logs:
-	@$(MAKE) logs-zitadel
-
-logs-external-iam:
-	docker compose -f docker-compose.external-iam.yml logs -f
-
-logs-zitadel:
-	docker compose -f docker-compose.zitadel.yml logs -f
+	$(COMPOSE) logs -f
 
 ps:
-	@$(MAKE) ps-zitadel
-
-ps-external-iam:
-	docker compose -f docker-compose.external-iam.yml ps
-
-ps-zitadel:
-	docker compose -f docker-compose.zitadel.yml ps
+	$(COMPOSE) ps
 
 clean:
-	@$(MAKE) clean-external-iam
-	@$(MAKE) clean-zitadel
-
-clean-external-iam:
-	docker compose -f docker-compose.external-iam.yml down -v
-
-clean-zitadel:
-	docker compose -f docker-compose.zitadel.yml down -v
+	$(COMPOSE) down -v
 
 # Demo
 demo:
@@ -158,15 +128,32 @@ test-uat-mega-bpmn:
 
 test-unit:
 	@mkdir -p reports
-	go test ./backend/... -coverprofile=reports/coverage.out -covermode=atomic -json 2>&1 | tee reports/unit-raw.json; \
-	go tool cover -func=reports/coverage.out > reports/coverage.txt; \
-	echo "Unit tests complete. Coverage in reports/coverage.txt"
+	bash -o pipefail -c 'go test ./backend/... -coverprofile=reports/coverage.out -covermode=atomic -json 2>&1 | tee reports/unit-raw.json'
+	go tool cover -func=reports/coverage.out > reports/coverage.txt
+	@echo "Unit tests complete. Coverage in reports/coverage.txt"
+
+quality-maintainability:
+	python3 scripts/quality/maintainability.py
+
+quality-coverage:
+	bash scripts/quality/coverage_gate.sh
+
+quality-race:
+	bash scripts/quality/race.sh
+
+quality-fuzz:
+	bash scripts/quality/fuzz.sh
+
+quality-mutation:
+	MUTATION_REQUIRED=true bash scripts/quality/mutation.sh
+
+quality-fast: quality-maintainability quality-coverage quality-race quality-fuzz
 
 test-integration:
 	@mkdir -p reports
-	curl -fsS http://localhost:8080/health >/dev/null 2>&1 || (echo "Stack not running. Run make up or make up-zitadel first." && exit 1)
-	go test ./tests/integration/... -tags integration -v -json 2>&1 | tee reports/integration-raw.json; \
-	echo "Integration tests complete."
+	curl -fsS http://localhost:8080/health >/dev/null 2>&1 || (echo "Stack not running. Run make up first." && exit 1)
+	bash -o pipefail -c 'go test ./tests/integration/... -tags integration -v -json 2>&1 | tee reports/integration-raw.json'
+	@echo "Integration tests complete."
 
 test-e2e:
 	@mkdir -p reports
@@ -187,7 +174,7 @@ test-perf:
 		-e WORKFLOW_ID="$(WORKFLOW_ID)" \
 		-v "$(PWD)/tests/performance/k6:/scripts" \
 		-v "$(PWD)/reports:/reports" \
-		grafana/k6:latest run --out json=/reports/k6.json /scripts/run-all.js 2>&1 | tee reports/perf-raw.txt'
+		grafana/k6:0.57.0 run --out json=/reports/k6.json /scripts/run-all.js 2>&1 | tee reports/perf-raw.txt'
 	@echo "Performance tests complete."
 
 test-security:
@@ -197,9 +184,10 @@ test-security:
 	npm --prefix frontend audit --audit-level=high --omit=dev
 	npm --prefix clients/nodejs-sdk audit --audit-level=high --omit=dev
 	@if [ -f tests/e2e/playwright/package.json ]; then npm --prefix tests/e2e/playwright audit --audit-level=high --omit=dev; fi
-	@echo "[security] gitleaks (if installed)"
-	@if command -v gitleaks >/dev/null 2>&1; then gitleaks detect --source . --redact --no-git -v 2>&1 | tee reports/gitleaks.txt; else echo "gitleaks not installed — CI security.yml covers it"; fi
-	@echo "CodeQL runs in .github/workflows/security.yml (release-blocking on release/1.0)."
+	@echo "[security] gitleaks (required)"
+	@command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks is required" >&2; exit 1; }
+	bash -o pipefail -c 'gitleaks detect --source . --redact --no-git -v 2>&1 | tee reports/gitleaks.txt'
+	@echo "CodeQL runs in .github/workflows/security.yml and is release-blocking."
 
 test-dast:
 	@mkdir -p reports/dast
@@ -214,15 +202,14 @@ test-release-suite:
 	@echo "== release suite: bpmn matrix =="
 	@$(MAKE) test-bpmn-matrix
 	@echo "== release suite: bpmn exhaustive =="
-	@$(MAKE) test-bpmn-exhaustive || echo "WARN: bpmn-exhaustive skipped/failed"
+	@$(MAKE) test-bpmn-exhaustive
 	@echo "== release suite: smoke + helm =="
-	@$(MAKE) smoke-profiles
-	@$(MAKE) smoke-release-profiles
+	@$(MAKE) smoke
 	@$(MAKE) validate-helm
 	@echo "== release suite: security (SAST) =="
 	@$(MAKE) test-security
 	@echo "== release suite: worker conformance (requires stack) =="
-	@$(MAKE) worker-conformance || echo "WARN: worker-conformance skipped/failed (stack may be down)"
+	@$(MAKE) worker-conformance
 	@echo "== release suite: frontend unit =="
 	@mkdir -p reports && cd frontend && npm install --silent && npx vitest run --reporter=json --outputFile=../reports/frontend-vitest.json
 	@echo "Release suite core complete. Also run: make test-all, make test-all-functionality, make test-perf, make test-dast, make test-uat-mega-bpmn."

@@ -16,8 +16,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,9 +28,8 @@ import (
 
 func setupTestHandler(t *testing.T) *Handler {
 	return setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{
-		Mode:                iam.DeploymentModeExternal,
-		ProviderName:        "Corporate OIDC",
-		ConfigurationSource: "docker-compose",
+		IAMEnabled:   true,
+		ProviderName: "Corporate OIDC",
 		AuthConfig: auth.Config{
 			InternalIssuerURL:   "http://identity.internal/realms/artificialflow",
 			ExternalIssuerURL:   "https://identity.example.com/realms/artificialflow",
@@ -42,7 +39,6 @@ func setupTestHandler(t *testing.T) *Handler {
 			AllowInsecureIssuer: true,
 			ClaimSubjectPath:    "sub",
 			ClaimRolesPath:      "roles",
-			ClaimScopesPath:     "scope",
 			ClaimTenantPath:     "tenant_id",
 			ClaimEmailPath:      "email",
 			ClaimNamePath:       "name",
@@ -83,6 +79,8 @@ func setupTestHandlerWithRepository(t *testing.T, identityConfig iam.DeploymentC
 		&model.MessageSubscription{},
 		&model.IdempotencyRecord{},
 		&model.OutboxMessage{},
+		&model.DecisionDefinition{},
+		&model.ProcessInstanceMigration{},
 	); err != nil {
 		t.Fatalf("Failed to migrate schema: %v", err)
 	}
@@ -98,7 +96,7 @@ func registerTestRoutes(r *mux.Router, h *Handler) {
 			if _, ok := auth.PrincipalFromContext(req.Context()); !ok {
 				principal := auth.Principal{
 					Subject: "test-admin",
-					Roles:   []string{auth.RoleArtificialFlowAdmin},
+					Roles:   []string{auth.RoleAdmin},
 				}
 				req = req.WithContext(auth.WithPrincipal(req.Context(), principal))
 			}
@@ -127,11 +125,8 @@ func TestIdentityConfigAPI(t *testing.T) {
 	if err := json.NewDecoder(configResp.Body).Decode(&config); err != nil {
 		t.Fatalf("Failed to decode initial identity config: %v", err)
 	}
-	if config.DeploymentMode != iam.DeploymentModeExternal {
-		t.Fatalf("Expected deployment mode %q, got %q", iam.DeploymentModeExternal, config.DeploymentMode)
-	}
-	if config.ConfigurationSource != "docker-compose" {
-		t.Fatalf("Expected configuration source docker-compose, got %q", config.ConfigurationSource)
+	if !config.DeploymentMode {
+		t.Fatal("Expected deployment_mode true")
 	}
 	if config.ProviderName != "Corporate OIDC" {
 		t.Fatalf("Expected provider name Corporate OIDC, got %q", config.ProviderName)
@@ -160,7 +155,7 @@ func TestIdentityConfigAPI(t *testing.T) {
 	if config.FrontendOIDCClientID != "workflow-frontend" {
 		t.Fatalf("Unexpected frontend client id %q", config.FrontendOIDCClientID)
 	}
-	expectedRoles := []string{auth.RoleArtificialFlowAdmin, auth.RoleArtificialFlowModeler, auth.RoleArtificialFlowClient}
+	expectedRoles := []string{auth.RoleAdmin, auth.RoleBusiness, auth.RoleClient, auth.RoleAnalytics}
 	if len(config.StandardRoles) != len(expectedRoles) {
 		t.Fatalf("Expected %d standard roles, got %#v", len(expectedRoles), config.StandardRoles)
 	}
@@ -176,439 +171,13 @@ func TestIdentityManagementRoutesExternalModeReturnNotFound(t *testing.T) {
 	r := mux.NewRouter()
 	registerTestRoutes(r, h)
 	req := httptest.NewRequest(http.MethodGet, "/identity/management/users", nil)
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
+	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleAdmin}}))
 	rec := httptest.NewRecorder()
 
 	r.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("Expected 404 for external IAM management route, got %d", rec.Code)
-	}
-}
-
-func TestIdentityManagementRoutesBundledRequireAdmin(t *testing.T) {
-	h := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{Mode: iam.DeploymentModeZITADEL})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-	req := httptest.NewRequest(http.MethodGet, "/identity/management/users", nil)
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "accountant", Roles: []string{"accountant"}}))
-	rec := httptest.NewRecorder()
-
-	r.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("Expected 403 for non-admin bundled IAM management route, got %d", rec.Code)
-	}
-}
-
-func TestIdentityManagementRoutesBundledAdminListsUsers(t *testing.T) {
-	tokenFile := t.TempDir() + "/owner.pat"
-	stateFile := t.TempDir() + "/artificialflow-zitadel.json"
-	if err := os.WriteFile(tokenFile, []byte("owner-token"), 0600); err != nil {
-		t.Fatalf("Failed to write owner token: %v", err)
-	}
-	if err := os.WriteFile(stateFile, []byte(`{"org_id":"org-1","project_id":"project-1"}`), 0600); err != nil {
-		t.Fatalf("Failed to write bootstrap state: %v", err)
-	}
-	zitadel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/zitadel.user.v2.UserService/ListUsers":
-			_, _ = w.Write([]byte(`{"result":[{"userId":"user-1","username":"admin@example.com","preferredLoginName":"admin@example.com","state":"USER_STATE_ACTIVE","details":{"creationDate":"2026-01-01T00:00:00Z","changeDate":"2026-01-01T00:00:00Z"},"human":{"profile":{"givenName":"Admin","familyName":"User","displayName":"Admin User"},"email":{"email":"admin@example.com","isVerified":true}}},{"userId":"user-2","username":"artificialflow-bootstrap","preferredLoginName":"artificialflow-bootstrap","state":"USER_STATE_ACTIVE","machine":{"name":"artificialflow-bootstrap"}},{"userId":"user-3","username":"login-client","preferredLoginName":"login-client","state":"USER_STATE_ACTIVE","machine":{"name":"workflow-login-client"}}]}`))
-		case "/zitadel.authorization.v2.AuthorizationService/ListAuthorizations":
-			_, _ = w.Write([]byte(`{"authorizations":[{"id":"auth-1","state":"STATE_ACTIVE","project":{"id":"project-1"},"user":{"id":"user-1"},"roles":[{"key":"artificialflow admin","displayName":"ArtificialFlow Admin","group":"ArtificialFlow"}]}]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer zitadel.Close()
-
-	h := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{
-		Mode: iam.DeploymentModeZITADEL,
-		ZITADELManagement: iam.ZITADELManagementConfig{
-			BaseURL:            zitadel.URL,
-			OwnerPATFile:       tokenFile,
-			BootstrapStateFile: stateFile,
-		},
-	})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-	req := httptest.NewRequest(http.MethodGet, "/identity/management/users", nil)
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	rec := httptest.NewRecorder()
-
-	r.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected 200 for admin bundled IAM management route, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var response dto.ListIdentityManagementUsersResponse
-	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
-		t.Fatalf("Failed to decode users response: %v", err)
-	}
-	hiddenIdentities := []string{"workflow-login-client", "login-client", "artificialflow-bootstrap"}
-	for _, user := range response.Users {
-		userIdentities := []string{user.Username, user.PreferredLoginName, user.DisplayName, user.Email}
-		for _, userIdentity := range userIdentities {
-			for _, hiddenIdentity := range hiddenIdentities {
-				if strings.EqualFold(strings.TrimSpace(userIdentity), hiddenIdentity) {
-					t.Fatalf("Expected internal ZITADEL user %q to be hidden, got %#v", hiddenIdentity, response.Users)
-				}
-			}
-		}
-	}
-	if len(response.Users) != 1 {
-		t.Fatalf("Expected one user, got %#v", response.Users)
-	}
-	if response.Users[0].Email != "admin@example.com" {
-		t.Fatalf("Unexpected user email %q", response.Users[0].Email)
-	}
-	if len(response.Users[0].Roles) != 1 || response.Users[0].Roles[0] != auth.RoleArtificialFlowAdmin {
-		t.Fatalf("Unexpected user roles %#v", response.Users[0].Roles)
-	}
-}
-
-func TestIdentityManagementReactivateUserRequiresBundledAdmin(t *testing.T) {
-	tokenFile := t.TempDir() + "/owner.pat"
-	stateFile := t.TempDir() + "/artificialflow-zitadel.json"
-	if err := os.WriteFile(tokenFile, []byte("owner-token"), 0600); err != nil {
-		t.Fatalf("Failed to write owner token: %v", err)
-	}
-	if err := os.WriteFile(stateFile, []byte(`{"org_id":"org-1","project_id":"project-1"}`), 0600); err != nil {
-		t.Fatalf("Failed to write bootstrap state: %v", err)
-	}
-
-	reactivateCalled := false
-	zitadel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
-		}
-		switch r.URL.Path {
-		case "/zitadel.user.v2.UserService/ReactivateUser":
-			reactivateCalled = true
-			var payload map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Fatalf("failed to decode reactivate payload: %v", err)
-			}
-			if payload["userId"] != "user-1" {
-				t.Fatalf("expected user-1 reactivate payload, got %#v", payload)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer zitadel.Close()
-
-	h := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{
-		Mode: iam.DeploymentModeZITADEL,
-		ZITADELManagement: iam.ZITADELManagementConfig{
-			BaseURL:            zitadel.URL,
-			OwnerPATFile:       tokenFile,
-			BootstrapStateFile: stateFile,
-		},
-	})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-
-	nonAdminReq := httptest.NewRequest(http.MethodPost, "/identity/management/users/user-1/reactivate", nil)
-	nonAdminReq = nonAdminReq.WithContext(auth.WithPrincipal(nonAdminReq.Context(), auth.Principal{Subject: "accountant", Roles: []string{"accountant"}}))
-	nonAdminRec := httptest.NewRecorder()
-	r.ServeHTTP(nonAdminRec, nonAdminReq)
-	if nonAdminRec.Code != http.StatusForbidden {
-		t.Fatalf("expected non-admin reactivate 403, got %d: %s", nonAdminRec.Code, nonAdminRec.Body.String())
-	}
-
-	adminReq := httptest.NewRequest(http.MethodPost, "/identity/management/users/user-1/reactivate", nil)
-	adminReq = adminReq.WithContext(auth.WithPrincipal(adminReq.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	adminRec := httptest.NewRecorder()
-	r.ServeHTTP(adminRec, adminReq)
-	if adminRec.Code != http.StatusNoContent {
-		t.Fatalf("expected admin reactivate 204, got %d: %s", adminRec.Code, adminRec.Body.String())
-	}
-	if !reactivateCalled {
-		t.Fatalf("expected ZITADEL ReactivateUser to be called")
-	}
-}
-
-func TestIdentityManagementProtectsArtificialFlowPlatformRoles(t *testing.T) {
-	h := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{Mode: iam.DeploymentModeZITADEL})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-	admin := auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}
-
-	requests := []struct {
-		name   string
-		method string
-		path   string
-		body   string
-	}{
-		{
-			name:   "create viewer",
-			method: http.MethodPost,
-			path:   "/identity/management/roles",
-			body:   `{"key":"artificialflow viewer","display_name":"ArtificialFlow Viewer","group":"ArtificialFlow"}`,
-		},
-		{
-			name:   "update admin",
-			method: http.MethodPut,
-			path:   "/identity/management/roles/artificialflow%20admin",
-			body:   `{"display_name":"Changed Admin","group":"ArtificialFlow"}`,
-		},
-		{
-			name:   "delete modeler",
-			method: http.MethodDelete,
-			path:   "/identity/management/roles/artificialflow%20modeler",
-		},
-		{
-			name:   "delete client",
-			method: http.MethodDelete,
-			path:   "/identity/management/roles/artificialflow%20client",
-		},
-	}
-
-	for _, tc := range requests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
-			req = req.WithContext(auth.WithPrincipal(req.Context(), admin))
-			rec := httptest.NewRecorder()
-
-			r.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("expected protected platform role request to return 400, got %d: %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
-}
-
-func TestIdentityManagementRoutesBundledAdminCreatesClientToken(t *testing.T) {
-	tokenFile := t.TempDir() + "/owner.pat"
-	stateFile := t.TempDir() + "/artificialflow-zitadel.json"
-	if err := os.WriteFile(tokenFile, []byte("owner-token"), 0600); err != nil {
-		t.Fatalf("Failed to write owner token: %v", err)
-	}
-	if err := os.WriteFile(stateFile, []byte(`{"org_id":"org-1","project_id":"project-1"}`), 0600); err != nil {
-		t.Fatalf("Failed to write bootstrap state: %v", err)
-	}
-	var createUserPayload map[string]any
-	var createAuthorizationPayload map[string]any
-	var tokenPayload map[string]any
-	zitadel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/zitadel.user.v2.UserService/CreateUser":
-			if err := json.NewDecoder(r.Body).Decode(&createUserPayload); err != nil {
-				t.Fatalf("failed to decode create user payload: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"id":"client-user-1"}`))
-		case "/zitadel.authorization.v2.AuthorizationService/ListAuthorizations":
-			_, _ = w.Write([]byte(`{"authorizations":[]}`))
-		case "/zitadel.authorization.v2.AuthorizationService/CreateAuthorization":
-			if err := json.NewDecoder(r.Body).Decode(&createAuthorizationPayload); err != nil {
-				t.Fatalf("failed to decode create authorization payload: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"id":"auth-1"}`))
-		case "/zitadel.user.v2.UserService/AddPersonalAccessToken":
-			if err := json.NewDecoder(r.Body).Decode(&tokenPayload); err != nil {
-				t.Fatalf("failed to decode token payload: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"creationDate":"2026-01-01T00:00:00Z","tokenId":"pat-1","token":"sdk-token"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer zitadel.Close()
-
-	h := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{
-		Mode: iam.DeploymentModeZITADEL,
-		ZITADELManagement: iam.ZITADELManagementConfig{
-			BaseURL:                 zitadel.URL,
-			OwnerPATFile:            tokenFile,
-			BootstrapStateFile:      stateFile,
-			EnableLegacyPATCreation: true,
-		},
-	})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-	body := `{"username":"sdk-orders","name":"Orders SDK","description":"Order system","environment":"production","owner_email":"platform@example.com","purpose":"Order worker","token_expires_at":"2027-01-01T00:00:00Z"}`
-	req := httptest.NewRequest(http.MethodPost, "/identity/management/clients", strings.NewReader(body))
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	rec := httptest.NewRecorder()
-
-	r.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("Expected 201 for client token creation, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Pragma") != "no-cache" {
-		t.Fatalf("expected one-time token response to disable caching, got headers %#v", rec.Header())
-	}
-	var response dto.IdentityManagementClientTokenResponse
-	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
-		t.Fatalf("Failed to decode client token response: %v", err)
-	}
-	if response.ClientID != "client-user-1" || response.TokenID != "pat-1" || response.Token != "sdk-token" {
-		t.Fatalf("Unexpected client token response: %#v", response)
-	}
-	if response.Role != auth.RoleArtificialFlowClient {
-		t.Fatalf("Expected client role %q, got %q", auth.RoleArtificialFlowClient, response.Role)
-	}
-	if createUserPayload["organizationId"] != "org-1" || createUserPayload["username"] != "sdk-orders" {
-		t.Fatalf("Unexpected create user payload: %#v", createUserPayload)
-	}
-	machine, ok := createUserPayload["machine"].(map[string]any)
-	if !ok {
-		t.Fatalf("Expected machine payload, got %#v", createUserPayload)
-	}
-	description, ok := machine["description"].(string)
-	if !ok || !strings.Contains(description, "Order system") || !strings.Contains(description, "production") || !strings.Contains(description, "platform@example.com") {
-		t.Fatalf("Unexpected machine description: %#v", machine["description"])
-	}
-	if machine["name"] != "Orders SDK" || machine["accessTokenType"] != "ACCESS_TOKEN_TYPE_JWT" {
-		t.Fatalf("Unexpected machine payload: %#v", machine)
-	}
-	roleKeys, ok := createAuthorizationPayload["roleKeys"].([]any)
-	if !ok || len(roleKeys) != 1 || roleKeys[0] != auth.RoleArtificialFlowClient {
-		t.Fatalf("Unexpected authorization payload: %#v", createAuthorizationPayload)
-	}
-	if tokenPayload["userId"] != "client-user-1" || tokenPayload["expirationDate"] != "2027-01-01T00:00:00Z" {
-		t.Fatalf("Unexpected PAT payload: %#v", tokenPayload)
-	}
-}
-
-func TestIdentityManagementRoutesBundledAdminManagesClients(t *testing.T) {
-	tokenFile := t.TempDir() + "/owner.pat"
-	stateFile := t.TempDir() + "/artificialflow-zitadel.json"
-	if err := os.WriteFile(tokenFile, []byte("owner-token"), 0600); err != nil {
-		t.Fatalf("Failed to write owner token: %v", err)
-	}
-	if err := os.WriteFile(stateFile, []byte(`{"org_id":"org-1","project_id":"project-1"}`), 0600); err != nil {
-		t.Fatalf("Failed to write bootstrap state: %v", err)
-	}
-	var rotatePayload map[string]any
-	var revokePayload map[string]any
-	var deletePayload map[string]any
-	zitadel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/zitadel.user.v2.UserService/ListUsers":
-			_, _ = w.Write([]byte(`{"result":[{"userId":"client-user-1","username":"sdk-orders","preferredLoginName":"sdk-orders","state":"USER_STATE_ACTIVE","details":{"creationDate":"2026-01-01T00:00:00Z","changeDate":"2026-01-02T00:00:00Z"},"machine":{"name":"Orders SDK","description":"artificialflow-client:{\"description\":\"Order system\",\"environment\":\"production\",\"owner_email\":\"platform@example.com\",\"purpose\":\"Order worker\"}"}},{"userId":"bootstrap","username":"artificialflow-bootstrap","state":"USER_STATE_ACTIVE","machine":{"name":"artificialflow-bootstrap"}}]}`))
-		case "/zitadel.authorization.v2.AuthorizationService/ListAuthorizations":
-			_, _ = w.Write([]byte(`{"authorizations":[{"id":"auth-1","state":"STATE_ACTIVE","project":{"id":"project-1"},"user":{"id":"client-user-1"},"roles":[{"key":"artificialflow client"}]}]}`))
-		case "/zitadel.user.v2.UserService/ListPersonalAccessTokens":
-			_, _ = w.Write([]byte(`{"result":[{"id":"pat-1","userId":"client-user-1","organizationId":"org-1","creationDate":"2026-01-01T00:00:00Z","changeDate":"2026-01-01T00:00:00Z","expirationDate":"2027-01-01T00:00:00Z"}]}`))
-		case "/zitadel.user.v2.UserService/ListKeys":
-			_, _ = w.Write([]byte(`{"keys":[]}`))
-		case "/zitadel.user.v2.UserService/GetUserByID":
-			_, _ = w.Write([]byte(`{"user":{"userId":"client-user-1","username":"sdk-orders","preferredLoginName":"sdk-orders","state":"USER_STATE_ACTIVE","details":{"creationDate":"2026-01-01T00:00:00Z","changeDate":"2026-01-02T00:00:00Z"},"machine":{"name":"Orders SDK","description":"artificialflow-client:{\"description\":\"Order system\",\"environment\":\"production\",\"owner_email\":\"platform@example.com\",\"purpose\":\"Order worker\"}"}}}`))
-		case "/zitadel.user.v2.UserService/AddPersonalAccessToken":
-			if err := json.NewDecoder(r.Body).Decode(&rotatePayload); err != nil {
-				t.Fatalf("failed to decode rotate payload: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"creationDate":"2026-02-01T00:00:00Z","tokenId":"pat-2","token":"rotated-token"}`))
-		case "/zitadel.user.v2.UserService/RemovePersonalAccessToken":
-			if err := json.NewDecoder(r.Body).Decode(&revokePayload); err != nil {
-				t.Fatalf("failed to decode revoke payload: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"deletionDate":"2026-02-02T00:00:00Z"}`))
-		case "/zitadel.user.v2.UserService/DeleteUser":
-			if err := json.NewDecoder(r.Body).Decode(&deletePayload); err != nil {
-				t.Fatalf("failed to decode delete payload: %v", err)
-			}
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer zitadel.Close()
-
-	h := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{
-		Mode: iam.DeploymentModeZITADEL,
-		ZITADELManagement: iam.ZITADELManagementConfig{
-			BaseURL:                 zitadel.URL,
-			OwnerPATFile:            tokenFile,
-			BootstrapStateFile:      stateFile,
-			EnableLegacyPATRotation: true,
-		},
-	})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-
-	req := httptest.NewRequest(http.MethodGet, "/identity/management/clients", nil)
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected 200 for client list, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var listResponse dto.ListIdentityManagementClientsResponse
-	if err := json.NewDecoder(rec.Body).Decode(&listResponse); err != nil {
-		t.Fatalf("Failed to decode client list: %v", err)
-	}
-	if len(listResponse.Clients) != 1 || listResponse.Clients[0].ClientID != "client-user-1" || listResponse.Clients[0].Environment != "production" {
-		t.Fatalf("Unexpected client list response: %#v", listResponse)
-	}
-	if len(listResponse.Clients[0].Tokens) != 1 || listResponse.Clients[0].Tokens[0].TokenID != "pat-1" {
-		t.Fatalf("Unexpected token summaries: %#v", listResponse.Clients[0].Tokens)
-	}
-
-	rotateBody := `{"token_expires_at":"2028-01-01T00:00:00Z"}`
-	req = httptest.NewRequest(http.MethodPost, "/identity/management/clients/client-user-1/tokens", strings.NewReader(rotateBody))
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("Expected 201 for client token rotation, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Pragma") != "no-cache" {
-		t.Fatalf("expected rotated token response to disable caching, got headers %#v", rec.Header())
-	}
-	var rotateResponse dto.IdentityManagementClientTokenResponse
-	if err := json.NewDecoder(rec.Body).Decode(&rotateResponse); err != nil {
-		t.Fatalf("Failed to decode rotated token: %v", err)
-	}
-	if rotateResponse.TokenID != "pat-2" || rotateResponse.Token != "rotated-token" || rotatePayload["userId"] != "client-user-1" {
-		t.Fatalf("Unexpected rotate response or payload: %#v %#v", rotateResponse, rotatePayload)
-	}
-	if revokePayload != nil {
-		t.Fatalf("rotation must preserve the old token until explicit revocation, got revoke payload %#v", revokePayload)
-	}
-
-	req = httptest.NewRequest(http.MethodDelete, "/identity/management/clients/client-user-1/tokens/pat-1", nil)
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("Expected 204 for client token revoke, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if revokePayload["userId"] != "client-user-1" || revokePayload["tokenId"] != "pat-1" {
-		t.Fatalf("Unexpected revoke payload: %#v", revokePayload)
-	}
-
-	req = httptest.NewRequest(http.MethodDelete, "/identity/management/clients/client-user-1", nil)
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}))
-	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("Expected 204 for client delete, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if deletePayload["userId"] != "client-user-1" {
-		t.Fatalf("Unexpected delete payload: %#v", deletePayload)
 	}
 }
 
@@ -875,7 +444,7 @@ func TestModelerRoleCanDeployAndReadProcessesOnly(t *testing.T) {
 	r := mux.NewRouter()
 	registerTestRoutes(r, h)
 
-	modeler := auth.Principal{Subject: "modeler", Roles: []string{auth.RoleArtificialFlowModeler}}
+	modeler := auth.Principal{Subject: "modeler", Roles: []string{auth.RoleBusiness}}
 	bpmnXML := `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_ModelerOnly" targetNamespace="http://artificialflow.local/test">
   <bpmn:process id="ModelerOnly" name="Modeler Only" isExecutable="true">
@@ -1239,264 +808,73 @@ func TestExternalWorkerActivateAndCompleteJobAPI(t *testing.T) {
 	}
 }
 
-func TestUserTaskOwnershipRequiresEligibleRoleAndClaim(t *testing.T) {
+func TestRoleMatrix(t *testing.T) {
 	h := setupTestHandler(t)
 	r := mux.NewRouter()
 	registerTestRoutes(r, h)
 
-	bpmn := `<?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:artificialflow="http://artificialflow.io/schema/1.0/bpmn" id="Definitions_TaskOwnership" targetNamespace="http://artificialflow.local/test">
-  <bpmn:process id="TaskOwnership" name="Task Ownership" isExecutable="true">
-    <bpmn:startEvent id="start"><bpmn:outgoing>f1</bpmn:outgoing></bpmn:startEvent>
-    <bpmn:userTask id="accountantReview" name="Accountant Review" artificialflow:assignee="accountant" artificialflow:candidateGroups="accountant"><bpmn:incoming>f1</bpmn:incoming><bpmn:outgoing>f2</bpmn:outgoing></bpmn:userTask>
-    <bpmn:endEvent id="end"><bpmn:incoming>f2</bpmn:incoming></bpmn:endEvent>
-    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="accountantReview"/>
-    <bpmn:sequenceFlow id="f2" sourceRef="accountantReview" targetRef="end"/>
-  </bpmn:process>
-</bpmn:definitions>`
+	admin := auth.Principal{Subject: "admin", Roles: []string{auth.RoleAdmin}}
+	business := auth.Principal{Subject: "business", Roles: []string{auth.RoleBusiness}}
+	client := auth.Principal{Subject: "sdk", Roles: []string{auth.RoleClient}}
+	analytics := auth.Principal{Subject: "analytics", Roles: []string{auth.RoleAnalytics}}
+	endUser := auth.Principal{Subject: "accountant", Roles: []string{"accountant"}}
 
-	deployReq := httptest.NewRequest(http.MethodPost, "/workflows", strings.NewReader(bpmn))
-	deployReq.Header.Set("Content-Type", "application/xml")
-	deployRec := httptest.NewRecorder()
-	r.ServeHTTP(deployRec, deployReq)
-	if deployRec.Code != http.StatusOK {
-		t.Fatalf("expected deploy 200, got %d: %s", deployRec.Code, deployRec.Body.String())
+	routes := []struct {
+		method, path string
+		allowed      []auth.Principal
+	}{
+		{http.MethodGet, "/workflows", []auth.Principal{admin, business, client}},
+		{http.MethodGet, "/workflows/1", []auth.Principal{admin, business, client}},
+		{http.MethodDelete, "/workflows/1", []auth.Principal{admin}},
+		{http.MethodGet, "/decisions", []auth.Principal{admin, business, client}},
+		{http.MethodPost, "/decisions/d1/evaluate", []auth.Principal{admin, client}},
+		{http.MethodGet, "/tasks", []auth.Principal{admin, client}},
+		{http.MethodGet, "/instances", []auth.Principal{admin, client}},
+		{http.MethodGet, "/instances/history/completed", []auth.Principal{admin, client}},
+		{http.MethodGet, "/instances/1", []auth.Principal{admin, client}},
+		{http.MethodPost, "/instances/1/variables", []auth.Principal{admin, client}},
+		{http.MethodGet, "/instances/1/tasks", []auth.Principal{admin, client}},
+		{http.MethodPost, "/instances/1/tasks/2/claim", []auth.Principal{admin, client}},
+		{http.MethodPost, "/instances/1/tasks/2/complete", []auth.Principal{admin, client}},
+		{http.MethodDelete, "/instances/1", []auth.Principal{admin}},
+		{http.MethodGet, "/instances/1/jobs", []auth.Principal{admin}},
+		{http.MethodGet, "/incidents", []auth.Principal{admin}},
+		{http.MethodPost, "/jobs/1/retry", []auth.Principal{admin}},
+		{http.MethodPost, "/instances/1/migration/dry-run", []auth.Principal{admin}},
+		{http.MethodPost, "/jobs/activate", []auth.Principal{admin, client}},
+		{http.MethodGet, "/internal/metrics", []auth.Principal{admin}},
 	}
-	var workflow dto.WorkflowDefinitionResponse
-	if err := json.NewDecoder(deployRec.Body).Decode(&workflow); err != nil {
-		t.Fatalf("failed to decode workflow: %v", err)
-	}
-
-	startBody, _ := json.Marshal(dto.StartInstanceRequest{WorkflowID: workflow.ID, Context: map[string]any{"source": "ownership-test"}})
-	startReq := httptest.NewRequest(http.MethodPost, "/instances", bytes.NewBuffer(startBody))
-	startReq.Header.Set("Content-Type", "application/json")
-	startRec := httptest.NewRecorder()
-	r.ServeHTTP(startRec, startReq)
-	if startRec.Code != http.StatusOK {
-		t.Fatalf("expected start 200, got %d: %s", startRec.Code, startRec.Body.String())
-	}
-	var instance dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(startRec.Body).Decode(&instance); err != nil {
-		t.Fatalf("failed to decode instance: %v", err)
-	}
-
-	accountant := auth.Principal{Subject: "accountant", Email: "accountant@artificialflow.local", Roles: []string{"accountant"}}
-	reviewer := auth.Principal{Subject: "reviewer", Email: "reviewer@artificialflow.local", Roles: []string{"reviewer"}}
-	modeler := auth.Principal{Subject: "modeler", Roles: []string{auth.RoleArtificialFlowModeler}}
-	integrationClient := auth.Principal{Subject: "sdk-client", Roles: []string{auth.RoleArtificialFlowClient}}
-
-	reviewerInstancesReq := requestAs(http.MethodGet, "/instances", nil, reviewer)
-	reviewerInstancesRec := httptest.NewRecorder()
-	r.ServeHTTP(reviewerInstancesRec, reviewerInstancesReq)
-	if reviewerInstancesRec.Code != http.StatusOK {
-		t.Fatalf("expected reviewer scoped instances 200, got %d: %s", reviewerInstancesRec.Code, reviewerInstancesRec.Body.String())
-	}
-	var reviewerInstances []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(reviewerInstancesRec.Body).Decode(&reviewerInstances); err != nil {
-		t.Fatalf("failed to decode reviewer instances: %v", err)
-	}
-	if containsWorkflowInstance(reviewerInstances, instance.ID) {
-		t.Fatalf("reviewer should not see accountant-owned instance %s, got %#v", instance.ID, reviewerInstances)
-	}
-
-	accountantInstancesReq := requestAs(http.MethodGet, "/instances", nil, accountant)
-	accountantInstancesRec := httptest.NewRecorder()
-	r.ServeHTTP(accountantInstancesRec, accountantInstancesReq)
-	if accountantInstancesRec.Code != http.StatusOK {
-		t.Fatalf("expected accountant scoped instances 200, got %d: %s", accountantInstancesRec.Code, accountantInstancesRec.Body.String())
-	}
-	var accountantInstances []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(accountantInstancesRec.Body).Decode(&accountantInstances); err != nil {
-		t.Fatalf("failed to decode accountant instances: %v", err)
-	}
-	if !containsWorkflowInstance(accountantInstances, instance.ID) {
-		t.Fatalf("accountant should see assigned instance %s, got %#v", instance.ID, accountantInstances)
-	}
-
-	modelerInstancesReq := requestAs(http.MethodGet, "/instances", nil, modeler)
-	modelerInstancesRec := httptest.NewRecorder()
-	r.ServeHTTP(modelerInstancesRec, modelerInstancesReq)
-	if modelerInstancesRec.Code != http.StatusForbidden {
-		t.Fatalf("expected modeler direct instances 403, got %d: %s", modelerInstancesRec.Code, modelerInstancesRec.Body.String())
-	}
-
-	reviewerGetReq := requestAs(http.MethodGet, "/instances/"+instance.ID, nil, reviewer)
-	reviewerGetRec := httptest.NewRecorder()
-	r.ServeHTTP(reviewerGetRec, reviewerGetReq)
-	if reviewerGetRec.Code != http.StatusForbidden {
-		t.Fatalf("expected reviewer get instance 403, got %d: %s", reviewerGetRec.Code, reviewerGetRec.Body.String())
-	}
-
-	reviewerTasksReq := requestAs(http.MethodGet, "/instances/"+instance.ID+"/tasks", nil, reviewer)
-	reviewerTasksRec := httptest.NewRecorder()
-	r.ServeHTTP(reviewerTasksRec, reviewerTasksReq)
-	if reviewerTasksRec.Code != http.StatusForbidden {
-		t.Fatalf("expected reviewer list tasks 403, got %d: %s", reviewerTasksRec.Code, reviewerTasksRec.Body.String())
-	}
-
-	accountantDirectTasksReq := requestAs(http.MethodGet, "/instances/"+instance.ID+"/tasks", nil, accountant)
-	accountantDirectTasksRec := httptest.NewRecorder()
-	r.ServeHTTP(accountantDirectTasksRec, accountantDirectTasksReq)
-	if accountantDirectTasksRec.Code != http.StatusOK {
-		t.Fatalf("expected accountant direct task list 200, got %d: %s", accountantDirectTasksRec.Code, accountantDirectTasksRec.Body.String())
-	}
-
-	tasksReq := requestAsInbox(http.MethodGet, "/inbox/instances/"+instance.ID+"/tasks", nil, integrationClient, accountant)
-	tasksRec := httptest.NewRecorder()
-	r.ServeHTTP(tasksRec, tasksReq)
-	if tasksRec.Code != http.StatusOK {
-		t.Fatalf("expected accountant inbox list tasks 200, got %d: %s", tasksRec.Code, tasksRec.Body.String())
-	}
-	var tasks dto.ListUserTasksResponse
-	if err := json.NewDecoder(tasksRec.Body).Decode(&tasks); err != nil {
-		t.Fatalf("failed to decode tasks: %v", err)
-	}
-	if len(tasks.Tasks) != 1 {
-		t.Fatalf("expected one user task, got %#v", tasks.Tasks)
-	}
-	if !tasks.Tasks[0].CanClaim || tasks.Tasks[0].CanComplete {
-		t.Fatalf("accountant should be able to claim but not complete before claiming: %#v", tasks.Tasks[0])
-	}
-	executionID := tasks.Tasks[0].ExecutionID
-
-	reviewerClaim := requestAs(http.MethodPost, "/instances/"+instance.ID+"/tasks/"+executionID+"/claim", nil, reviewer)
-	reviewerClaimRec := httptest.NewRecorder()
-	r.ServeHTTP(reviewerClaimRec, reviewerClaim)
-	if reviewerClaimRec.Code != http.StatusForbidden {
-		t.Fatalf("expected reviewer claim 403, got %d: %s", reviewerClaimRec.Code, reviewerClaimRec.Body.String())
-	}
-
-	accountantDirectClaim := requestAs(http.MethodPost, "/instances/"+instance.ID+"/tasks/"+executionID+"/claim", nil, accountant)
-	accountantDirectClaimRec := httptest.NewRecorder()
-	r.ServeHTTP(accountantDirectClaimRec, accountantDirectClaim)
-	if accountantDirectClaimRec.Code != http.StatusForbidden {
-		t.Fatalf("expected accountant direct claim 403, got %d: %s", accountantDirectClaimRec.Code, accountantDirectClaimRec.Body.String())
-	}
-
-	accountantClaim := requestAsInbox(http.MethodPost, "/inbox/instances/"+instance.ID+"/tasks/"+executionID+"/claim", nil, integrationClient, accountant)
-	accountantClaimRec := httptest.NewRecorder()
-	r.ServeHTTP(accountantClaimRec, accountantClaim)
-	if accountantClaimRec.Code != http.StatusOK {
-		t.Fatalf("expected accountant inbox claim 200, got %d: %s", accountantClaimRec.Code, accountantClaimRec.Body.String())
-	}
-
-	reviewerComplete := requestAs(http.MethodPost, "/instances/"+instance.ID+"/tasks/"+executionID+"/complete", nil, reviewer)
-	reviewerCompleteRec := httptest.NewRecorder()
-	r.ServeHTTP(reviewerCompleteRec, reviewerComplete)
-	if reviewerCompleteRec.Code != http.StatusForbidden {
-		t.Fatalf("expected reviewer complete 403, got %d: %s", reviewerCompleteRec.Code, reviewerCompleteRec.Body.String())
-	}
-
-	accountantDirectComplete := requestAs(http.MethodPost, "/instances/"+instance.ID+"/tasks/"+executionID+"/complete", nil, accountant)
-	accountantDirectCompleteRec := httptest.NewRecorder()
-	r.ServeHTTP(accountantDirectCompleteRec, accountantDirectComplete)
-	if accountantDirectCompleteRec.Code != http.StatusForbidden {
-		t.Fatalf("expected accountant direct complete 403, got %d: %s", accountantDirectCompleteRec.Code, accountantDirectCompleteRec.Body.String())
-	}
-
-	accountantComplete := requestAsInbox(http.MethodPost, "/inbox/instances/"+instance.ID+"/tasks/"+executionID+"/complete", nil, integrationClient, accountant)
-	accountantCompleteRec := httptest.NewRecorder()
-	r.ServeHTTP(accountantCompleteRec, accountantComplete)
-	if accountantCompleteRec.Code != http.StatusOK {
-		t.Fatalf("expected accountant inbox complete 200, got %d: %s", accountantCompleteRec.Code, accountantCompleteRec.Body.String())
-	}
-
-	activeTasksReq := requestAsInbox(http.MethodGet, "/inbox/instances/"+instance.ID+"/tasks", nil, integrationClient, accountant)
-	activeTasksRec := httptest.NewRecorder()
-	r.ServeHTTP(activeTasksRec, activeTasksReq)
-	if activeTasksRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox active task history 200, got %d: %s", activeTasksRec.Code, activeTasksRec.Body.String())
-	}
-	var activeTasks dto.ListUserTasksResponse
-	if err := json.NewDecoder(activeTasksRec.Body).Decode(&activeTasks); err != nil {
-		t.Fatalf("failed to decode active tasks: %v", err)
-	}
-	if len(activeTasks.Tasks) != 0 {
-		t.Fatalf("completed user task should be hidden from active task list, got %#v", activeTasks.Tasks)
-	}
-
-	historyReq := requestAsInbox(http.MethodGet, "/inbox/instances/"+instance.ID+"/tasks?includeCompleted=true", nil, integrationClient, accountant)
-	historyRec := httptest.NewRecorder()
-	r.ServeHTTP(historyRec, historyReq)
-	if historyRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox completed task history 200, got %d: %s", historyRec.Code, historyRec.Body.String())
-	}
-	var history dto.ListUserTasksResponse
-	if err := json.NewDecoder(historyRec.Body).Decode(&history); err != nil {
-		t.Fatalf("failed to decode completed task history: %v", err)
-	}
-	if len(history.Tasks) != 1 {
-		t.Fatalf("expected one completed task history row, got %#v", history.Tasks)
-	}
-	if history.Tasks[0].State != "COMPLETED" {
-		t.Fatalf("expected completed task state, got %#v", history.Tasks[0])
-	}
-	if history.Tasks[0].ClaimedBy == "" {
-		t.Fatalf("expected completed task actor to be recorded, got %#v", history.Tasks[0])
-	}
-
-	completedHistoryReq := requestAs(http.MethodGet, "/instances/history/completed", nil, accountant)
-	completedHistoryRec := httptest.NewRecorder()
-	r.ServeHTTP(completedHistoryRec, completedHistoryReq)
-	if completedHistoryRec.Code != http.StatusOK {
-		t.Fatalf("expected accountant direct completed history 200, got %d: %s", completedHistoryRec.Code, completedHistoryRec.Body.String())
-	}
-	var completedInstances []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(completedHistoryRec.Body).Decode(&completedInstances); err != nil {
-		t.Fatalf("failed to decode completed instance history: %v", err)
-	}
-	foundCompletedInstance := false
-	for _, completedInstance := range completedInstances {
-		if completedInstance.ID == instance.ID && completedInstance.Status == string(model.StatusCompleted) {
-			foundCompletedInstance = true
-			break
+	everyone := []auth.Principal{admin, business, client, analytics, endUser}
+	for _, route := range routes {
+		for _, principal := range everyone {
+			allowed := false
+			for _, candidate := range route.allowed {
+				if candidate.Subject == principal.Subject {
+					allowed = true
+				}
+			}
+			req := requestAs(route.method, route.path, strings.NewReader("{}"), principal)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if allowed && rec.Code == http.StatusForbidden {
+				t.Errorf("%s %s as %s: expected access, got 403", route.method, route.path, principal.Subject)
+			}
+			if !allowed && rec.Code != http.StatusForbidden {
+				t.Errorf("%s %s as %s: expected 403, got %d", route.method, route.path, principal.Subject, rec.Code)
+			}
 		}
-	}
-	if !foundCompletedInstance {
-		t.Fatalf("expected completed instance %s in accountant history, got %#v", instance.ID, completedInstances)
-	}
-
-	reviewerHistoryReq := requestAs(http.MethodGet, "/instances/history/completed", nil, reviewer)
-	reviewerHistoryRec := httptest.NewRecorder()
-	r.ServeHTTP(reviewerHistoryRec, reviewerHistoryReq)
-	if reviewerHistoryRec.Code != http.StatusOK {
-		t.Fatalf("expected reviewer direct completed history 200, got %d: %s", reviewerHistoryRec.Code, reviewerHistoryRec.Body.String())
-	}
-	var reviewerCompletedInstances []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(reviewerHistoryRec.Body).Decode(&reviewerCompletedInstances); err != nil {
-		t.Fatalf("failed to decode reviewer completed history: %v", err)
-	}
-	if containsWorkflowInstance(reviewerCompletedInstances, instance.ID) {
-		t.Fatalf("reviewer should not see accountant-owned completed instance %s, got %#v", instance.ID, reviewerCompletedInstances)
-	}
-
-	adminHistoryReq := requestAs(http.MethodGet, "/instances/history/completed", nil, auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}})
-	adminHistoryRec := httptest.NewRecorder()
-	r.ServeHTTP(adminHistoryRec, adminHistoryReq)
-	if adminHistoryRec.Code != http.StatusOK {
-		t.Fatalf("expected admin completed history 200, got %d: %s", adminHistoryRec.Code, adminHistoryRec.Body.String())
-	}
-	var adminCompletedInstances []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(adminHistoryRec.Body).Decode(&adminCompletedInstances); err != nil {
-		t.Fatalf("failed to decode admin completed history: %v", err)
-	}
-	if !containsWorkflowInstance(adminCompletedInstances, instance.ID) {
-		t.Fatalf("admin should see completed instance %s, got %#v", instance.ID, adminCompletedInstances)
 	}
 }
 
-func TestTaskInboxRequiresClientIntegrationAndExcludesAdminClientHistory(t *testing.T) {
-	h, repo := setupTestHandlerWithRepository(t, iam.DeploymentConfig{
-		Mode:                iam.DeploymentModeExternal,
-		ProviderName:        "Corporate OIDC",
-		ConfigurationSource: "test",
-	})
+func TestClientTaskSearchClaimAndComplete(t *testing.T) {
+	h, repo := setupTestHandlerWithRepository(t, iam.DeploymentConfig{IAMEnabled: true})
 	r := mux.NewRouter()
 	registerTestRoutes(r, h)
 
 	bpmn := `<?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:artificialflow="http://artificialflow.io/schema/1.0/bpmn" id="Definitions_Inbox" targetNamespace="http://artificialflow.local/test">
-  <bpmn:process id="InboxTask" name="Inbox Task" isExecutable="true">
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:artificialflow="http://artificialflow.io/schema/1.0/bpmn" id="Definitions_TaskSearch" targetNamespace="http://artificialflow.local/test">
+  <bpmn:process id="TaskSearch" name="Task Search" isExecutable="true">
     <bpmn:startEvent id="start"><bpmn:outgoing>f1</bpmn:outgoing></bpmn:startEvent>
     <bpmn:userTask id="accountantReview" name="Accountant Review" artificialflow:candidateGroups="accountant"><bpmn:incoming>f1</bpmn:incoming><bpmn:outgoing>f2</bpmn:outgoing></bpmn:userTask>
     <bpmn:endEvent id="end"><bpmn:incoming>f2</bpmn:incoming></bpmn:endEvent>
@@ -1517,11 +895,34 @@ func TestTaskInboxRequiresClientIntegrationAndExcludesAdminClientHistory(t *test
 		t.Fatalf("failed to decode workflow: %v", err)
 	}
 
-	startBody, _ := json.Marshal(dto.StartInstanceRequest{WorkflowID: workflow.ID, Context: map[string]any{"source": "inbox-test"}})
-	startReq := httptest.NewRequest(http.MethodPost, "/instances", bytes.NewBuffer(startBody))
-	startReq.Header.Set("Content-Type", "application/json")
-	startRec := httptest.NewRecorder()
-	r.ServeHTTP(startRec, startReq)
+	client := auth.Principal{Subject: "sdk-client", Roles: []string{auth.RoleClient}}
+	serve := func(method, target, body string, principal auth.Principal) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		req := requestAs(method, target, reader, principal)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+	search := func(query string) []dto.UserTaskResponse {
+		t.Helper()
+		rec := serve(http.MethodGet, "/tasks"+query, "", client)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("search %s: expected 200, got %d: %s", query, rec.Code, rec.Body.String())
+		}
+		var resp dto.ListUserTasksResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode search: %v", err)
+		}
+		return resp.Tasks
+	}
+
+	startBody, _ := json.Marshal(dto.StartInstanceRequest{WorkflowID: workflow.ID})
+	startRec := serve(http.MethodPost, "/instances", string(startBody), client)
 	if startRec.Code != http.StatusOK {
 		t.Fatalf("expected start 200, got %d: %s", startRec.Code, startRec.Body.String())
 	}
@@ -1529,338 +930,131 @@ func TestTaskInboxRequiresClientIntegrationAndExcludesAdminClientHistory(t *test
 	if err := json.NewDecoder(startRec.Body).Decode(&instance); err != nil {
 		t.Fatalf("failed to decode instance: %v", err)
 	}
-	instanceKey, err := strconv.ParseInt(instance.ID, 10, 64)
-	if err != nil {
-		t.Fatalf("failed to parse instance id: %v", err)
-	}
+	instanceKey, _ := strconv.ParseInt(instance.ID, 10, 64)
 	createdJobs, err := repo.ListJobsByProcessInstanceAndType(context.Background(), instanceKey, application.UserTaskJobType)
-	if err != nil || len(createdJobs) != 1 {
-		t.Fatalf("expected one newly written user task, got jobs=%#v err=%v", createdJobs, err)
-	}
-	if createdJobs[0].Type != application.UserTaskJobType {
-		t.Fatalf("new user-task writes must use %q, got %q", application.UserTaskJobType, createdJobs[0].Type)
+	if err != nil || len(createdJobs) != 1 || createdJobs[0].Type != application.UserTaskJobType {
+		t.Fatalf("expected one user task of type %q, got jobs=%#v err=%v", application.UserTaskJobType, createdJobs, err)
 	}
 
-	integrationClient := auth.Principal{Subject: "sdk-client", Roles: []string{auth.RoleArtificialFlowClient}}
-	actingUser := auth.Principal{
-		Subject: "accountant",
-		Email:   "accountant@artificialflow.local",
-		Roles:   []string{"accountant"},
-		Claims:  map[string]any{"username": "accountant"},
+	if tasks := search("?candidateGroup=reviewer"); len(tasks) != 0 {
+		t.Fatalf("reviewer group should not match accountant task, got %#v", tasks)
 	}
+	tasks := search("?candidateGroup=reviewer,Accountant&processInstanceKey=" + instance.ID)
+	if len(tasks) != 1 {
+		t.Fatalf("expected accountant task, got %#v", tasks)
+	}
+	task := tasks[0]
+	if task.ProcessInstanceKey != instance.ID || task.ProcessDefinitionKey == "" || !task.CanClaim || task.CanComplete {
+		t.Fatalf("unexpected task facts before claim: %#v", task)
+	}
+	taskPath := "/instances/" + task.ProcessInstanceKey + "/tasks/" + task.ExecutionID
 
-	nonClientReq := requestAsInbox(http.MethodGet, "/inbox", nil, auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin}}, actingUser)
-	nonClientRec := httptest.NewRecorder()
-	r.ServeHTTP(nonClientRec, nonClientReq)
-	if nonClientRec.Code != http.StatusForbidden {
-		t.Fatalf("expected non-client integration principal to be denied, got %d: %s", nonClientRec.Code, nonClientRec.Body.String())
+	if rec := serve(http.MethodPost, taskPath+"/claim", "", client); rec.Code != http.StatusBadRequest {
+		t.Fatalf("client claim without assignee: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-
-	adminIntegrationReq := requestAsInbox(http.MethodGet, "/inbox", nil, auth.Principal{Subject: "admin-client", Roles: []string{auth.RoleArtificialFlowAdmin, auth.RoleArtificialFlowClient}}, actingUser)
-	adminIntegrationRec := httptest.NewRecorder()
-	r.ServeHTTP(adminIntegrationRec, adminIntegrationReq)
-	if adminIntegrationRec.Code != http.StatusForbidden {
-		t.Fatalf("expected admin integration principal to be denied, got %d: %s", adminIntegrationRec.Code, adminIntegrationRec.Body.String())
+	if rec := serve(http.MethodPost, taskPath+"/claim", `{"assignee":"x","extra":1}`, client); rec.Code != http.StatusBadRequest {
+		t.Fatalf("claim with unknown field: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-
-	missingActingReq := requestAs(http.MethodGet, "/inbox", nil, integrationClient)
-	missingActingRec := httptest.NewRecorder()
-	r.ServeHTTP(missingActingRec, missingActingReq)
-	if missingActingRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected missing acting user to be rejected, got %d: %s", missingActingRec.Code, missingActingRec.Body.String())
-	}
-
-	actingAdminReq := requestAsInbox(http.MethodGet, "/inbox", nil, integrationClient, auth.Principal{Subject: "admin", Roles: []string{auth.RoleArtificialFlowAdmin, "accountant"}})
-	actingAdminRec := httptest.NewRecorder()
-	r.ServeHTTP(actingAdminRec, actingAdminReq)
-	if actingAdminRec.Code != http.StatusForbidden {
-		t.Fatalf("expected admin acting user to be denied, got %d: %s", actingAdminRec.Code, actingAdminRec.Body.String())
-	}
-
-	inboxReq := requestAsInbox(http.MethodGet, "/inbox", nil, integrationClient, actingUser)
-	inboxRec := httptest.NewRecorder()
-	r.ServeHTTP(inboxRec, inboxReq)
-	if inboxRec.Code != http.StatusOK {
-		t.Fatalf("expected SDK client inbox 200 for acting user, got %d: %s", inboxRec.Code, inboxRec.Body.String())
-	}
-	var inboxInstances []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(inboxRec.Body).Decode(&inboxInstances); err != nil {
-		t.Fatalf("failed to decode inbox response: %v", err)
-	}
-	if !containsWorkflowInstance(inboxInstances, instance.ID) {
-		t.Fatalf("expected inbox to contain instance %s, got %#v", instance.ID, inboxInstances)
-	}
-
-	tasksReq := requestAsInbox(http.MethodGet, "/inbox/instances/"+instance.ID+"/tasks", nil, integrationClient, actingUser)
-	tasksRec := httptest.NewRecorder()
-	r.ServeHTTP(tasksRec, tasksReq)
-	if tasksRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox tasks 200, got %d: %s", tasksRec.Code, tasksRec.Body.String())
-	}
-	var tasks dto.ListUserTasksResponse
-	if err := json.NewDecoder(tasksRec.Body).Decode(&tasks); err != nil {
-		t.Fatalf("failed to decode inbox tasks: %v", err)
-	}
-	if len(tasks.Tasks) != 1 {
-		t.Fatalf("expected one inbox task, got %#v", tasks.Tasks)
-	}
-	executionID := tasks.Tasks[0].ExecutionID
-
-	claimReq := requestAsInbox(http.MethodPost, "/inbox/instances/"+instance.ID+"/tasks/"+executionID+"/claim", nil, integrationClient, actingUser)
-	claimRec := httptest.NewRecorder()
-	r.ServeHTTP(claimRec, claimReq)
+	claimRec := serve(http.MethodPost, taskPath+"/claim", `{"assignee":"accountant@example.com"}`, client)
 	if claimRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox claim 200, got %d: %s", claimRec.Code, claimRec.Body.String())
+		t.Fatalf("client claim: expected 200, got %d: %s", claimRec.Code, claimRec.Body.String())
+	}
+	var claimed dto.UserTaskResponse
+	if err := json.NewDecoder(claimRec.Body).Decode(&claimed); err != nil {
+		t.Fatalf("decode claim: %v", err)
+	}
+	if claimed.ClaimedBy != "accountant@example.com" || !claimed.CanComplete {
+		t.Fatalf("unexpected claimed task: %#v", claimed)
+	}
+	if rec := serve(http.MethodPost, taskPath+"/claim", `{"assignee":"someone-else"}`, client); rec.Code != http.StatusConflict {
+		t.Fatalf("claim of task held by another user: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if tasks := search("?assignee=ACCOUNTANT@example.com"); len(tasks) != 1 {
+		t.Fatalf("assignee search should match claim owner, got %#v", tasks)
+	}
+	if rec := serve(http.MethodPost, taskPath+"/complete", `{"assignee":"someone-else"}`, client); rec.Code != http.StatusConflict {
+		t.Fatalf("complete by non-owner: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := serve(http.MethodPost, taskPath+"/complete", `{"assignee":"accountant@example.com"}`, client); rec.Code != http.StatusOK {
+		t.Fatalf("complete by owner: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	completeReq := requestAsInbox(http.MethodPost, "/inbox/instances/"+instance.ID+"/tasks/"+executionID+"/complete", nil, integrationClient, actingUser)
-	completeRec := httptest.NewRecorder()
-	r.ServeHTTP(completeRec, completeReq)
-	if completeRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox complete 200, got %d: %s", completeRec.Code, completeRec.Body.String())
+	if tasks := search("?candidateGroup=accountant"); len(tasks) != 0 {
+		t.Fatalf("completed task must leave the active search, got %#v", tasks)
+	}
+	completed := search("?assignee=accountant@example.com&state=completed")
+	if len(completed) != 1 || completed[0].State != "COMPLETED" || completed[0].ClaimedBy != "accountant@example.com" {
+		t.Fatalf("expected completed task history for the user, got %#v", completed)
 	}
 
-	historyReq := requestAsInbox(http.MethodGet, "/inbox/history", nil, integrationClient, actingUser)
-	historyRec := httptest.NewRecorder()
-	r.ServeHTTP(historyRec, historyReq)
-	if historyRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox history 200, got %d: %s", historyRec.Code, historyRec.Body.String())
-	}
-	var history []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(historyRec.Body).Decode(&history); err != nil {
-		t.Fatalf("failed to decode inbox history: %v", err)
-	}
-	if !containsWorkflowInstance(history, instance.ID) {
-		t.Fatalf("expected my completed history to contain instance %s, got %#v", instance.ID, history)
+	for _, query := range []string{"?state=open", "?limit=0", "?limit=501", "?processInstanceKey=abc", "?includeUnassigned=maybe"} {
+		if rec := serve(http.MethodGet, "/tasks"+query, "", client); rec.Code != http.StatusBadRequest {
+			t.Fatalf("search %s: expected 400, got %d", query, rec.Code)
+		}
 	}
 }
 
-func TestTaskInboxFiltersSiblingTasksForActingUser(t *testing.T) {
+func TestAdminClaimDefaultsToOwnIdentityAndCanReassign(t *testing.T) {
 	h := setupTestHandler(t)
 	r := mux.NewRouter()
 	registerTestRoutes(r, h)
 
-	steps := []model.StepDefinition{
-		{ID: "start", Type: model.StepTypeStart, Outgoing: []model.Transition{{TargetRef: "split"}}},
-		{ID: "split", Type: model.StepTypeGatewayParallel, Outgoing: []model.Transition{
-			{TargetRef: "accountantReview"},
-			{TargetRef: "reviewerReview"},
-		}},
-		{
-			ID:         "accountantReview",
-			Type:       model.StepTypeUserTask,
-			Properties: map[string]any{"candidate_groups": "accountant"},
-			Outgoing:   []model.Transition{{TargetRef: "join"}},
-		},
-		{
-			ID:         "reviewerReview",
-			Type:       model.StepTypeUserTask,
-			Properties: map[string]any{"candidate_groups": "reviewer"},
-			Outgoing:   []model.Transition{{TargetRef: "join"}},
-		},
-		{ID: "join", Type: model.StepTypeGatewayParallel, Incoming: []string{"accountantReview", "reviewerReview"}, Outgoing: []model.Transition{{TargetRef: "end"}}},
-		{ID: "end", Type: model.StepTypeEnd},
+	bpmn := `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:artificialflow="http://artificialflow.io/schema/1.0/bpmn" id="Definitions_AdminClaim" targetNamespace="http://artificialflow.local/test">
+  <bpmn:process id="AdminClaim" name="Admin Claim" isExecutable="true">
+    <bpmn:startEvent id="start"><bpmn:outgoing>f1</bpmn:outgoing></bpmn:startEvent>
+    <bpmn:userTask id="review" name="Review" artificialflow:assignee="accountant"><bpmn:incoming>f1</bpmn:incoming><bpmn:outgoing>f2</bpmn:outgoing></bpmn:userTask>
+    <bpmn:endEvent id="end"><bpmn:incoming>f2</bpmn:incoming></bpmn:endEvent>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="review"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="review" targetRef="end"/>
+  </bpmn:process>
+</bpmn:definitions>`
+	deployReq := httptest.NewRequest(http.MethodPost, "/workflows", strings.NewReader(bpmn))
+	deployReq.Header.Set("Content-Type", "application/xml")
+	deployRec := httptest.NewRecorder()
+	r.ServeHTTP(deployRec, deployReq)
+	var workflow dto.WorkflowDefinitionResponse
+	if err := json.NewDecoder(deployRec.Body).Decode(&workflow); err != nil {
+		t.Fatalf("failed to decode workflow: %v", err)
 	}
-	wf, err := h.engine.DeployWorkflow(context.Background(), "Inbox Task Filtering", steps)
-	if err != nil {
-		t.Fatalf("failed to deploy workflow: %v", err)
+	startBody, _ := json.Marshal(dto.StartInstanceRequest{WorkflowID: workflow.ID})
+	startReq := httptest.NewRequest(http.MethodPost, "/instances", bytes.NewBuffer(startBody))
+	startRec := httptest.NewRecorder()
+	r.ServeHTTP(startRec, startReq)
+	var instance dto.WorkflowInstanceResponse
+	if err := json.NewDecoder(startRec.Body).Decode(&instance); err != nil {
+		t.Fatalf("failed to decode instance: %v", err)
 	}
-	instance, err := h.engine.StartInstance(context.Background(), strconv.FormatInt(wf.ID, 10), map[string]any{"source": "task-filter-test"})
-	if err != nil {
-		t.Fatalf("failed to start instance: %v", err)
-	}
-
-	integrationClient := auth.Principal{Subject: "sdk-client", Roles: []string{auth.RoleArtificialFlowClient}}
-	actingAccountant := auth.Principal{
-		Subject: "accountant",
-		Email:   "accountant@artificialflow.local",
-		Roles:   []string{"accountant"},
-		Claims:  map[string]any{"username": "accountant"},
-	}
-
-	tasksReq := requestAsInbox(http.MethodGet, "/inbox/instances/"+instance.ID+"/tasks", nil, integrationClient, actingAccountant)
 	tasksRec := httptest.NewRecorder()
-	r.ServeHTTP(tasksRec, tasksReq)
-	if tasksRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox tasks 200, got %d: %s", tasksRec.Code, tasksRec.Body.String())
-	}
+	r.ServeHTTP(tasksRec, httptest.NewRequest(http.MethodGet, "/instances/"+instance.ID+"/tasks", nil))
 	var tasks dto.ListUserTasksResponse
-	if err := json.NewDecoder(tasksRec.Body).Decode(&tasks); err != nil {
-		t.Fatalf("failed to decode inbox tasks: %v", err)
+	if err := json.NewDecoder(tasksRec.Body).Decode(&tasks); err != nil || len(tasks.Tasks) != 1 {
+		t.Fatalf("expected one task, got %#v err=%v", tasks, err)
 	}
-	if len(tasks.Tasks) != 1 || tasks.Tasks[0].ElementID != "accountantReview" {
-		t.Fatalf("expected only accountant task, got %#v", tasks.Tasks)
-	}
-	if containsUserTask(tasks.Tasks, "reviewerReview") {
-		t.Fatalf("reviewer task should not be exposed to accountant, got %#v", tasks.Tasks)
-	}
+	taskPath := "/instances/" + instance.ID + "/tasks/" + tasks.Tasks[0].ExecutionID
 
-	instanceReq := requestAsInbox(http.MethodGet, "/inbox/instances/"+instance.ID, nil, integrationClient, actingAccountant)
-	instanceRec := httptest.NewRecorder()
-	r.ServeHTTP(instanceRec, instanceReq)
-	if instanceRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox instance 200, got %d: %s", instanceRec.Code, instanceRec.Body.String())
+	admin := auth.Principal{Subject: "admin-sub", Email: "admin@example.com", Roles: []string{auth.RoleAdmin}}
+	claimRec := httptest.NewRecorder()
+	r.ServeHTTP(claimRec, requestAs(http.MethodPost, taskPath+"/claim", nil, admin))
+	var claimed dto.UserTaskResponse
+	if err := json.NewDecoder(claimRec.Body).Decode(&claimed); err != nil || claimed.ClaimedBy != "admin@example.com" {
+		t.Fatalf("admin claim should default to own identity, got %d %#v err=%v", claimRec.Code, claimed, err)
 	}
-	var response dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(instanceRec.Body).Decode(&response); err != nil {
-		t.Fatalf("failed to decode inbox instance: %v", err)
+	reassignRec := httptest.NewRecorder()
+	r.ServeHTTP(reassignRec, requestAs(http.MethodPost, taskPath+"/claim", strings.NewReader(`{"assignee":"accountant"}`), admin))
+	if reassignRec.Code != http.StatusOK {
+		t.Fatalf("admin reassign: expected 200, got %d: %s", reassignRec.Code, reassignRec.Body.String())
 	}
-	embeddedTasks := userTasksFromInstance(response)
-	if len(embeddedTasks) != 1 || embeddedTasks[0].ElementID != "accountantReview" {
-		t.Fatalf("expected only accountant embedded task, got %#v", embeddedTasks)
-	}
-	if containsUserTask(embeddedTasks, "reviewerReview") {
-		t.Fatalf("reviewer embedded task should not be exposed to accountant, got %#v", embeddedTasks)
-	}
-}
-
-func TestTaskInboxHistoryFindsSparseOlderCompletedTask(t *testing.T) {
-	h, repo := setupTestHandlerWithRepository(t, iam.DeploymentConfig{
-		Mode:                iam.DeploymentModeExternal,
-		ProviderName:        "Corporate OIDC",
-		ConfigurationSource: "test",
-	})
-	r := mux.NewRouter()
-	registerTestRoutes(r, h)
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	target := &model.ProcessInstance{
-		Key:                  9001,
-		ID:                   "target",
-		ProcessDefinitionKey: 100,
-		Version:              1,
-		State:                "COMPLETED",
-		CreatedAt:            now.Add(-3 * time.Hour),
-		EndTime:              now.Add(-2 * time.Hour),
-	}
-	if err := repo.CreateProcessInstance(ctx, target); err != nil {
-		t.Fatalf("failed to seed target process instance: %v", err)
-	}
-	if err := repo.CreateJob(ctx, &model.Job{
-		Key:                19001,
-		Type:               application.UserTaskJobType,
-		ProcessInstanceKey: target.Key,
-		ElementInstanceKey: 29001,
-		ElementID:          "accountantReview",
-		Worker:             " accountant@artificialflow.local ",
-		Retries:            1,
-		State:              "COMPLETED",
-		CreatedAt:          target.CreatedAt,
-		UpdatedAt:          target.EndTime,
-	}); err != nil {
-		t.Fatalf("failed to seed target job: %v", err)
-	}
-
-	for i := 0; i < 101; i++ {
-		key := int64(9100 + i)
-		endTime := now.Add(time.Duration(i) * time.Minute)
-		instance := &model.ProcessInstance{
-			Key:                  key,
-			ID:                   fmt.Sprintf("other-%d", i),
-			ProcessDefinitionKey: 100,
-			Version:              1,
-			State:                "COMPLETED",
-			CreatedAt:            endTime.Add(-time.Hour),
-			EndTime:              endTime,
-		}
-		if err := repo.CreateProcessInstance(ctx, instance); err != nil {
-			t.Fatalf("failed to seed other process instance %d: %v", i, err)
-		}
-		if err := repo.CreateJob(ctx, &model.Job{
-			Key:                int64(19100 + i),
-			Type:               application.UserTaskJobType,
-			ProcessInstanceKey: key,
-			ElementInstanceKey: int64(29100 + i),
-			ElementID:          "reviewerReview",
-			Worker:             "reviewer@artificialflow.local",
-			Retries:            1,
-			State:              "COMPLETED",
-			CreatedAt:          instance.CreatedAt,
-			UpdatedAt:          instance.EndTime,
-		}); err != nil {
-			t.Fatalf("failed to seed other job %d: %v", i, err)
-		}
-	}
-
-	integrationClient := auth.Principal{Subject: "sdk-client", Roles: []string{auth.RoleArtificialFlowClient}}
-	actingAccountant := auth.Principal{
-		Subject: "accountant",
-		Email:   "accountant@artificialflow.local",
-		Roles:   []string{"accountant"},
-		Claims:  map[string]any{"username": "accountant"},
-	}
-	historyReq := requestAsInbox(http.MethodGet, "/inbox/history?limit=1", nil, integrationClient, actingAccountant)
-	historyRec := httptest.NewRecorder()
-	r.ServeHTTP(historyRec, historyReq)
-	if historyRec.Code != http.StatusOK {
-		t.Fatalf("expected sparse inbox history 200, got %d: %s", historyRec.Code, historyRec.Body.String())
-	}
-	var history []dto.WorkflowInstanceResponse
-	if err := json.NewDecoder(historyRec.Body).Decode(&history); err != nil {
-		t.Fatalf("failed to decode sparse inbox history: %v", err)
-	}
-	if len(history) != 1 || history[0].ID != strconv.FormatInt(target.Key, 10) {
-		t.Fatalf("expected sparse history to return target instance %d, got %#v", target.Key, history)
-	}
-}
-
-func TestActingPrincipalFromRequestReadsCanonicalHeaders(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/inbox", nil)
-	req.Header.Set(actingSubjectHeader, "canonical-subject")
-	req.Header.Set(actingUsernameHeader, "canonical-user")
-	req.Header.Set(actingEmailHeader, "canonical@artificialflow.io")
-	req.Header.Set(actingNameHeader, "Canonical User")
-	req.Header.Set(actingRolesHeader, "artificialflow admin, Finance Reviewer")
-
-	principal, err := actingPrincipalFromRequest(req)
-	if err != nil {
-		t.Fatalf("acting principal: %v", err)
-	}
-	if principal.Subject != "canonical-subject" || principal.Email != "canonical@artificialflow.io" || principal.Name != "Canonical User" {
-		t.Fatalf("expected canonical identity headers, got %#v", principal)
-	}
-	if username := principal.Claims["username"]; username != "canonical-user" {
-		t.Fatalf("expected canonical username, got %#v", username)
-	}
-	expectedRoles := []string{auth.RoleArtificialFlowAdmin, "Finance Reviewer"}
-	if !reflect.DeepEqual(principal.Roles, expectedRoles) {
-		t.Fatalf("expected canonical roles %#v, got %#v", expectedRoles, principal.Roles)
-	}
-}
-
-func TestActingPrincipalFromRequestFallsBackToUsername(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/inbox", nil)
-	req.Header.Set(actingUsernameHeader, "acting-user")
-	req.Header.Set(actingRolesHeader, "artificialflow modeler")
-
-	principal, err := actingPrincipalFromRequest(req)
-	if err != nil {
-		t.Fatalf("acting principal: %v", err)
-	}
-	if principal.Subject != "acting-user" {
-		t.Fatalf("expected username fallback subject, got %#v", principal)
-	}
-	if !reflect.DeepEqual(principal.Roles, []string{auth.RoleArtificialFlowModeler}) {
-		t.Fatalf("expected modeler role, got %#v", principal.Roles)
+	completeRec := httptest.NewRecorder()
+	r.ServeHTTP(completeRec, requestAs(http.MethodPost, taskPath+"/complete", nil, admin))
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("admin complete: expected 200, got %d: %s", completeRec.Code, completeRec.Body.String())
 	}
 }
 
 func requestAs(method, target string, body io.Reader, principal auth.Principal) *http.Request {
 	req := httptest.NewRequest(method, target, body)
 	return req.WithContext(auth.WithPrincipal(req.Context(), principal))
-}
-
-func requestAsInbox(method, target string, body io.Reader, integrationPrincipal auth.Principal, actingPrincipal auth.Principal) *http.Request {
-	req := requestAs(method, target, body, integrationPrincipal)
-	req.Header.Set(actingSubjectHeader, actingPrincipal.Subject)
-	req.Header.Set(actingEmailHeader, actingPrincipal.Email)
-	req.Header.Set(actingNameHeader, actingPrincipal.Name)
-	req.Header.Set(actingRolesHeader, strings.Join(actingPrincipal.Roles, ","))
-	if username, ok := actingPrincipal.Claims["username"].(string); ok {
-		req.Header.Set(actingUsernameHeader, username)
-	}
-	return req
 }
 
 func containsWorkflowInstance(instances []dto.WorkflowInstanceResponse, id string) bool {
@@ -2732,5 +1926,39 @@ func TestGetInstanceAPI(t *testing.T) {
 	}
 	if val, ok := fetchedInstance.Context["key"]; !ok || val != "val" {
 		t.Errorf("Expected context key=val, got %v", val)
+	}
+}
+
+func TestConsoleLoginOnlyInDisabledMode(t *testing.T) {
+	disabled := setupTestHandlerWithIdentityConfig(t, iam.DeploymentConfig{
+		IAMEnabled:   false,
+		ConsoleAdmin: iam.ConsoleAdminCredentials{Username: "admin", Password: "admin"},
+	})
+	r := mux.NewRouter()
+	registerTestRoutes(r, disabled)
+	login := func(router *mux.Router, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/identity/login", strings.NewReader(body)))
+		return rec
+	}
+
+	ok := login(r, `{"username":"admin","password":"admin"}`)
+	if ok.Code != http.StatusOK || !strings.Contains(ok.Body.String(), auth.RoleAdmin) {
+		t.Fatalf("expected admin login to succeed, got %d %s", ok.Code, ok.Body.String())
+	}
+	for body, want := range map[string]int{
+		`{"username":"admin","password":"wrong"}`: http.StatusUnauthorized,
+		`{"username":"root","password":"admin"}`:  http.StatusUnauthorized,
+		`{"username":"admin","extra":true}`:       http.StatusBadRequest,
+	} {
+		if got := login(r, body).Code; got != want {
+			t.Fatalf("login %s: got %d, want %d", body, got, want)
+		}
+	}
+
+	external := mux.NewRouter()
+	registerTestRoutes(external, setupTestHandler(t))
+	if got := login(external, `{"username":"admin","password":"admin"}`).Code; got != http.StatusNotFound {
+		t.Fatalf("external mode must not offer console login, got %d", got)
 	}
 }

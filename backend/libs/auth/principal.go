@@ -1,6 +1,11 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"strings"
+)
+
+const DefaultTenantID = "default"
 
 type Principal struct {
 	Subject   string         `json:"subject"`
@@ -10,7 +15,6 @@ type Principal struct {
 	Name      string         `json:"name,omitempty"`
 	TenantID  string         `json:"tenant_id,omitempty"`
 	Roles     []string       `json:"roles,omitempty"`
-	Scopes    []string       `json:"scopes,omitempty"`
 	TokenMode string         `json:"token_mode,omitempty"`
 	Claims    map[string]any `json:"claims,omitempty"`
 }
@@ -31,4 +35,19 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 		return Principal{}, false
 	}
 	return principal, true
+}
+
+// TenantIDFromContext returns the trusted tenant resolved by authentication.
+// Compatibility mode intentionally maps missing 1.x claims to the reserved
+// default tenant; request payloads and headers are never used as authority.
+func TenantIDFromContext(ctx context.Context) string {
+	principal, ok := PrincipalFromContext(ctx)
+	if !ok {
+		return DefaultTenantID
+	}
+	tenant := strings.TrimSpace(principal.TenantID)
+	if tenant == "" {
+		return DefaultTenantID
+	}
+	return tenant
 }

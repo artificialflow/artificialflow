@@ -27,8 +27,12 @@ func newIntrospectionVerifier(cfg Config) (TokenVerifier, error) {
 		return nil, err
 	}
 	cfg.IntrospectionURL = normalizedURL
+	timeout := cfg.HTTPTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
 	return &introspectionVerifier{
-		client:           &http.Client{Timeout: 10 * time.Second},
+		client:           &http.Client{Timeout: timeout},
 		config:           cfg,
 		introspectionURL: normalizedURL,
 	}, nil

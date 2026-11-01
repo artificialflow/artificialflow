@@ -13,14 +13,14 @@ ArtificialFlow `1.x` maintains the compatibility surfaces listed below.
 Compatibility-sensitive surfaces include:
 
 - Worker REST API (`/jobs/*` protocol headers, capabilities, activate/complete/fail/extend-lock).
-- Inbox REST API (`/inbox*`) used by SDK and browser inbox clients.
+- User tasks REST API (`GET /tasks`, `/instances/{id}/tasks*`).
 - Command and Query HTTP API `v1` response field meaning.
 - Protobuf package `artificialflow.api.v1`.
-- Node.js SDK public API (`@artificialflow/nodejs-sdk`), including inbox helpers.
+- Node.js SDK public API (`@artificialflow/nodejs-sdk`), including user-task helpers.
 - Go worker library public API (`backend/libs/worker` / published module path).
 - Docker image environment variables and exposed ports.
 - Helm chart values under `charts/artificialflow`.
-- IAM role names (`artificialflow admin`, `artificialflow modeler`, `artificialflow client`) and claim mapping behavior.
+- IAM role names (`artificialflowadmin`, `artificialflowbusiness`, `artificialflowclient`, `artificialflowanalytics`) and claim mapping behavior.
 - BPMN parser/runtime semantics documented in `docs/BPMN_SUPPORT_MATRIX.md`.
 
 ## Freeze tip (v1.0.0-rc.1)

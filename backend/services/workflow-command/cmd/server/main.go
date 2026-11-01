@@ -14,9 +14,13 @@ import (
 	"time"
 
 	"github.com/artificialflow/artificialflow/backend/libs/auth"
+	"github.com/artificialflow/artificialflow/backend/libs/httpproblem"
 	"github.com/artificialflow/artificialflow/backend/libs/iam"
+	"github.com/artificialflow/artificialflow/backend/libs/id"
 	"github.com/artificialflow/artificialflow/backend/libs/logger"
+	"github.com/artificialflow/artificialflow/backend/libs/metrics"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
+	"github.com/artificialflow/artificialflow/backend/libs/tracing"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/application"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/infrastructure/persistence"
 	api "github.com/artificialflow/artificialflow/backend/services/workflow-command/internal/interfaces/http"
@@ -27,14 +31,27 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 )
 
 func main() {
 	log := logger.New("workflow-command")
+	nodeID, err := id.ResolveSnowflakeNodeID(os.Getenv("SNOWFLAKE_NODE_ID"), os.Getenv("POD_NAME"))
+	if err != nil {
+		log.Error(context.Background(), "invalid snowflake node identity", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	id.InitDefaultNode(nodeID)
 	// Use explicit context for main to allow cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	tp, err := tracing.InitTracer(ctx, "workflow-command")
+	if err != nil {
+		log.Error(ctx, "failed to initialize tracing", map[string]any{"error": err.Error()})
+	} else {
+		defer func() { _ = tp.Shutdown(context.Background()) }()
+	}
 
 	pgDSN := os.Getenv("PG_DSN")
 	if pgDSN == "" {
@@ -47,7 +64,11 @@ func main() {
 	}
 
 	// Auth Configuration
-	deploymentConfig := iam.ResolveDeploymentConfigFromEnv()
+	deploymentConfig, err := iam.ResolveDeploymentConfigFromEnv()
+	if err != nil {
+		log.Error(ctx, "invalid IAM deployment configuration", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	authConfig := deploymentConfig.AuthConfig
 	internalIssuer := authConfig.InternalIssuerURL
 	externalIssuer := authConfig.ExternalIssuerURL
@@ -60,6 +81,7 @@ func main() {
 		"auth_client_id":  clientID,
 		"auth_mode":       authConfig.TokenValidationMode,
 		"auth_enabled":    authConfig.Enabled(),
+		"snowflake_node":  nodeID,
 	})
 	if authConfig.TokenValidationMode == auth.TokenModeIntrospection && strings.TrimSpace(authConfig.IntrospectionURL) == "" {
 		log.Error(ctx, "introspection auth mode requires introspection URL", map[string]any{
@@ -67,19 +89,9 @@ func main() {
 		})
 		os.Exit(1)
 	}
-	if authConfig.TokenValidationMode == auth.TokenModeIntrospection &&
-		(authConfig.IntrospectionClientIDFile != "" || authConfig.IntrospectionSecretFile != "") &&
-		(strings.TrimSpace(authConfig.IntrospectionClientID) == "" || strings.TrimSpace(authConfig.IntrospectionClientSecret) == "") {
-		log.Error(ctx, "introspection credential files are unavailable or empty", map[string]any{
-			"client_id_file_configured":     authConfig.IntrospectionClientIDFile != "",
-			"client_secret_file_configured": authConfig.IntrospectionSecretFile != "",
-		})
-		os.Exit(1)
-	}
 
 	// Initialize Auth Middleware
 	var authMiddleware *auth.Middleware
-	var err error
 
 	log.Info(ctx, "connecting to storage", nil)
 	repo, err := persistence.NewPostgresRepository(pgDSN)
@@ -104,36 +116,28 @@ func main() {
 	// Messaging Configuration
 	kafkaBrokers := envOrDefault("KAFKA_BROKERS", "localhost:9092")
 	eventTopic := envOrDefault("KAFKA_TOPIC_EVENTS", "workflow.events.v1")
-
-	// Event Bus Selection
-	eventBusType := envOrDefault("EVENT_BUS_TYPE", "kafka")
 	var publisher messaging.EventPublisher
-
-	switch strings.ToLower(eventBusType) {
-	case "nats":
-		natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
-		log.Info(ctx, "using nats event bus", map[string]any{"url": natsURL})
-		np, err := messaging.NewNatsPublisher(natsURL)
-		if err != nil {
-			log.Error(ctx, "failed to create nats publisher", map[string]any{"error": err.Error()})
-			os.Exit(1)
-		}
-		publisher = np
-	default:
-		// Default to Kafka
-		if kafkaBrokers != "" {
-			publisher = messaging.NewKafkaPublisher(splitAndTrim(kafkaBrokers), eventTopic)
-			log.Info(ctx, "kafka publisher initialized", map[string]any{
-				"brokers": kafkaBrokers,
-				"topic":   eventTopic,
-			})
-		} else {
-			publisher = &messaging.NoOpPublisher{}
-			log.Warn(ctx, "kafka publisher disabled (using no-op)", nil)
-		}
+	if kafkaBrokers != "" {
+		publisher = messaging.NewKafkaPublisher(splitAndTrim(kafkaBrokers), eventTopic)
+		log.Info(ctx, "kafka publisher initialized", map[string]any{
+			"brokers": kafkaBrokers,
+			"topic":   eventTopic,
+		})
+	} else {
+		publisher = &messaging.NoOpPublisher{}
+		log.Warn(ctx, "kafka publisher disabled (using no-op)", nil)
 	}
 
 	eng := application.NewEngine(repo, publisher)
+	eng.SetFlushOutboxAfterCommit(false)
+	metrics.NewOutboxCollector(func() metrics.OutboxSnapshot {
+		snapshot := eng.MetricsSnapshot()
+		return metrics.OutboxSnapshot{
+			Pending: snapshot.OutboxPending, PublishSuccess: snapshot.OutboxPublishSuccess,
+			PublishFailure: snapshot.OutboxPublishFailure, Retries: snapshot.OutboxRetries,
+			DeadLetters: snapshot.OutboxDeadLetters, PublishLagSec: snapshot.OutboxPublishLagSec,
+		}
+	})
 	outboxRelayMaxAttempts := envInt("OUTBOX_RELAY_MAX_ATTEMPTS", 10)
 	eng.SetOutboxMaxAttempts(outboxRelayMaxAttempts)
 	defer func() {
@@ -168,20 +172,16 @@ func main() {
 					return
 				case <-ticker.C:
 					relayCtx, cancel := context.WithTimeout(context.Background(), outboxRelayTimeout)
-					result, err := eng.RunOutboxRelayCycle(relayCtx, outboxRelayBatchSize)
-					cancel()
-					if err != nil {
-						log.Error(ctx, "outbox relay cycle failed", map[string]any{"error": err.Error()})
-						continue
-					}
-					if result.Pending > 0 || result.Published > 0 || result.Failed > 0 {
+					result, relayErr := eng.RunOutboxRelayCycle(relayCtx, outboxRelayBatchSize)
+					if relayErr != nil {
+						log.Error(ctx, "outbox relay cycle failed", map[string]any{"error": relayErr.Error()})
+					} else if result.Pending > 0 || result.Published > 0 || result.Failed > 0 {
 						log.Debug(ctx, "outbox relay cycle", map[string]any{
-							"pending":   result.Pending,
-							"claimed":   result.Claimed,
-							"published": result.Published,
-							"failed":    result.Failed,
+							"pending": result.Pending, "claimed": result.Claimed,
+							"published": result.Published, "failed": result.Failed,
 						})
 					}
+					cancel()
 				}
 			}
 		}()
@@ -205,18 +205,36 @@ func main() {
 					return
 				case <-ticker.C:
 					cleanupCtx, cancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
-					result, err := eng.RunIdempotencyCleanup(cleanupCtx, idempotencyRetention, idempotencyCleanupBatchSize)
-					cancel()
+					tenants, err := repo.EnsureRuntimeWorkTenants(cleanupCtx)
 					if err != nil {
+						cancel()
 						log.Error(ctx, "idempotency cleanup failed", map[string]any{"error": err.Error()})
 						continue
 					}
-					if result.Deleted > 0 {
-						log.Info(ctx, "idempotency cleanup completed", map[string]any{
-							"deleted": result.Deleted,
-							"cutoff":  result.Cutoff.Format(time.RFC3339),
+					for _, tenant := range tenants {
+						tenantBaseCtx, tenantCancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
+						tenantCtx := auth.WithPrincipal(tenantBaseCtx, auth.Principal{
+							Subject: "workflow-command", TenantID: tenant,
 						})
+						result, cleanupErr := eng.RunIdempotencyCleanup(
+							tenantCtx, idempotencyRetention, idempotencyCleanupBatchSize,
+						)
+						if cleanupErr != nil {
+							log.Error(ctx, "idempotency cleanup failed", map[string]any{
+								"tenant_id": tenant, "error": cleanupErr.Error(),
+							})
+							tenantCancel()
+							continue
+						}
+						if result.Deleted > 0 {
+							log.Info(ctx, "idempotency cleanup completed", map[string]any{
+								"tenant_id": tenant, "deleted": result.Deleted,
+								"cutoff": result.Cutoff.Format(time.RFC3339),
+							})
+						}
+						tenantCancel()
 					}
+					cancel()
 				}
 			}
 		}()
@@ -267,6 +285,12 @@ func main() {
 					return
 				case <-ticker.C:
 					bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					tenants, err := repo.EnsureRuntimeWorkTenants(bgCtx)
+					if err != nil {
+						log.Error(bgCtx, "runtime tenant discovery failed", map[string]any{"error": err.Error()})
+						cancel()
+						continue
+					}
 					acquired, err := repo.TryAcquireRuntimeSchedulerLease(bgCtx, leaseHolder, leaseTTL)
 					if err != nil {
 						log.Error(bgCtx, "runtime scheduler lease acquire failed", map[string]any{"error": err.Error()})
@@ -277,11 +301,22 @@ func main() {
 						cancel()
 						continue
 					}
-					if err := eng.CheckTimers(bgCtx); err != nil {
-						log.Error(bgCtx, "check timers failed", map[string]any{"error": err.Error()})
-					}
-					if err := eng.CheckSLAs(bgCtx); err != nil {
-						log.Error(bgCtx, "check SLAs failed", map[string]any{"error": err.Error()})
+					for _, tenant := range tenants {
+						tenantBaseCtx, tenantCancel := context.WithTimeout(context.Background(), 5*time.Second)
+						tenantCtx := auth.WithPrincipal(tenantBaseCtx, auth.Principal{
+							Subject: "workflow-command", TenantID: tenant,
+						})
+						if err := eng.CheckTimers(tenantCtx); err != nil {
+							log.Error(bgCtx, "check timers failed", map[string]any{
+								"tenant_id": tenant, "error": err.Error(),
+							})
+						}
+						if err := eng.CheckSLAs(tenantCtx); err != nil {
+							log.Error(bgCtx, "check SLAs failed", map[string]any{
+								"tenant_id": tenant, "error": err.Error(),
+							})
+						}
+						tenantCancel()
 					}
 					cancel()
 				}
@@ -305,12 +340,31 @@ func main() {
 		log.Info(ctx, "auth middleware enabled on router", nil)
 	}
 
-	// Health endpoint
-	r.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	livenessHandler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
-	}).Methods("GET")
-	r.HandleFunc("/identity/me", func(w http.ResponseWriter, r *http.Request) {
+	}
+	readinessHandler := func(w http.ResponseWriter, r *http.Request) {
+		checkCtx, checkCancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer checkCancel()
+		err := repo.Ready(checkCtx)
+		ready := err == nil
+		brokerReady := true
+		if checker, ok := publisher.(interface{ Ready(context.Context) error }); ok {
+			brokerReady = checker.Ready(checkCtx) == nil
+		}
+		metrics.SetDependencyReady("workflow-command", "postgres", ready)
+		metrics.SetDependencyReady("workflow-command", "broker", brokerReady)
+		metrics.SetSchemaReady("workflow-command", ready)
+		w.Header().Set("Content-Type", "application/json")
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "not-ready", "dependency": "postgres"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ready"})
+	}
+	identityHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		principal, ok := auth.PrincipalFromContext(r.Context())
 		if !ok {
@@ -321,9 +375,17 @@ func main() {
 			"authenticated": true,
 			"principal":     principal,
 		})
-	}).Methods("GET")
+	}
+	r.HandleFunc("/livez", livenessHandler).Methods("GET")
+	r.HandleFunc("/readyz", readinessHandler).Methods("GET")
+	r.HandleFunc("/health", readinessHandler).Methods("GET")
+	r.HandleFunc("/v1/health", readinessHandler).Methods("GET")
+	r.HandleFunc("/identity/me", identityHandler).Methods("GET")
+	r.HandleFunc("/v1/identity/me", identityHandler).Methods("GET")
 
 	handler.RegisterRoutes(r)
+	handler.RegisterRoutes(r.PathPrefix("/v1").Subrouter())
+	r.Use(metrics.MuxMiddleware("workflow-command"))
 
 	// Add logging middleware
 	httpMiddleware := logger.NewHTTPMiddleware("http")
@@ -343,19 +405,30 @@ func main() {
 		AllowedHeaders: []string{
 			"Authorization", "Content-Type", "X-Correlation-ID", "Idempotency-Key",
 			"X-Workflow-Worker-Protocol-Version",
-			"X-ArtificialFlow-Acting-Subject", "X-ArtificialFlow-Acting-Username",
-			"X-ArtificialFlow-Acting-Email", "X-ArtificialFlow-Acting-Name",
-			"X-ArtificialFlow-Acting-Roles",
 		},
 		AllowCredentials: allowCredentials,
 	})
 
 	srv := &http.Server{
-		Handler:      httpMiddleware.Middleware(c.Handler(r)),
+		Handler:      otelhttp.NewHandler(httpMiddleware.Middleware(httpproblem.Middleware(c.Handler(r))), "workflow-command.http"),
 		Addr:         serverAddr,
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
 	}
+
+	metricsAddr := envOrDefault("METRICS_ADDR", ":9090")
+	metricsServer := &http.Server{Addr: metricsAddr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error(ctx, "metrics server failed", map[string]any{"error": err.Error()})
+			cancel()
+		}
+	}()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
+	}()
 
 	// Start HTTP Server
 	go func() {
@@ -368,7 +441,7 @@ func main() {
 
 	// Start gRPC Server
 	grpcAddr := envOrDefault("GRPC_ADDR", ":50051")
-	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authMiddleware.UnaryServerInterceptor(auth.RoleArtificialFlowAdmin, auth.RoleArtificialFlowClient)))
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authMiddleware.UnaryServerInterceptor(auth.RoleAdmin, auth.RoleClient)))
 	jobWorkerServer := grpcImpl.NewServer(eng)
 	pb.RegisterJobWorkerServiceServer(grpcServer, jobWorkerServer)
 

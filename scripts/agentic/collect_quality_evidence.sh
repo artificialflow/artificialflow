@@ -109,8 +109,8 @@ while IFS= read -r path; do
       ;;
     docker-compose*.yml|charts/*|backend/Dockerfile*|frontend/Dockerfile|scripts/validate_helm.sh|scripts/validate_compose_kafka_wiring.sh)
       add_risk "Deployment assets may be affected by ${path}."
-      add_command "make smoke-profiles"
-      add_command "make smoke-release-profiles"
+      add_command "make smoke"
+      add_command "make smoke-release"
       add_command "make validate-helm"
       ;;
     .github/workflows/security.yml|.github/dependabot.yml|package-lock.json|frontend/package-lock.json|clients/nodejs-sdk/package-lock.json|go.mod|go.sum)
@@ -120,7 +120,7 @@ while IFS= read -r path; do
     .github/workflows/release-*|scripts/release_dry_run.sh|CHANGELOG.md|docs/RELEASE_CHECKLIST.md)
       add_risk "Release readiness may be affected by ${path}."
       add_command "make release-dry-run"
-      add_command "make smoke-release-profiles"
+      add_command "make smoke-release"
       ;;
     docs/*|README.md|CONTRIBUTING.md|CODE_OF_CONDUCT.md)
       add_risk "Documentation or community workflow may be affected by ${path}."

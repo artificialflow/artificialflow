@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ArtificialFlow.Sdk</RootNamespace>
+    <AssemblyName>ArtificialFlow.Sdk</AssemblyName>
+    <PackageId>ArtificialFlow.Sdk</PackageId>
+    <Version>1.2.0</Version>
+    <Authors>ArtificialFlow contributors</Authors>
+    <Description>REST SDK for the ArtificialFlow gateway API.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/artificialflow/artificialflow</RepositoryUrl>
+    <NoWarn>$(NoWarn);IDE1006;CS1591</NoWarn>
+  </PropertyGroup>
+</Project>

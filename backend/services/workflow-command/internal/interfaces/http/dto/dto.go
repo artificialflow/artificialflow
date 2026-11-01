@@ -56,6 +56,13 @@ type CompleteTaskRequest struct {
 	StepID string `json:"step_id"`
 }
 
+type InstanceMigrationRequest struct {
+	SourceDefinitionKey string            `json:"sourceDefinitionKey"`
+	TargetDefinitionKey string            `json:"targetDefinitionKey"`
+	ElementMapping      map[string]string `json:"elementMapping"`
+	OperationID         string            `json:"operationId,omitempty"`
+}
+
 type ExecutionResponse struct {
 	ID                 string            `json:"id"`
 	StepID             string            `json:"step_id"`
@@ -67,19 +74,21 @@ type ExecutionResponse struct {
 }
 
 type UserTaskResponse struct {
-	Key             string    `json:"key"`
-	ElementID       string    `json:"elementId"`
-	ExecutionID     string    `json:"executionId"`
-	State           string    `json:"state"`
-	Assignee        string    `json:"assignee,omitempty"`
-	CandidateUsers  []string  `json:"candidateUsers,omitempty"`
-	CandidateGroups []string  `json:"candidateGroups,omitempty"`
-	ClaimedBy       string    `json:"claimedBy,omitempty"`
-	CanClaim        bool      `json:"canClaim"`
-	CanComplete     bool      `json:"canComplete"`
-	DueDate         time.Time `json:"dueDate,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	Key                  string    `json:"key"`
+	ProcessInstanceKey   string    `json:"processInstanceKey"`
+	ProcessDefinitionKey string    `json:"processDefinitionKey"`
+	ElementID            string    `json:"elementId"`
+	ExecutionID          string    `json:"executionId"`
+	State                string    `json:"state"`
+	Assignee             string    `json:"assignee,omitempty"`
+	CandidateUsers       []string  `json:"candidateUsers,omitempty"`
+	CandidateGroups      []string  `json:"candidateGroups,omitempty"`
+	ClaimedBy            string    `json:"claimedBy,omitempty"`
+	CanClaim             bool      `json:"canClaim"`
+	CanComplete          bool      `json:"canComplete"`
+	DueDate              time.Time `json:"dueDate,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
 type ListUserTasksResponse struct {

@@ -26,6 +26,8 @@ export default function Incidents() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actionKey, setActionKey] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const fetchIncidents = useCallback(async (showLoading = true) => {
     if (showLoading) {
@@ -50,8 +52,39 @@ export default function Incidents() {
     void fetchIncidents();
   }, [fetchIncidents]);
 
+  const retry = async (incident: Incident) => {
+    if (!incident.jobKey) return;
+    setActionKey(incident.key);
+    setError(null);
+    setActionMessage(null);
+    try {
+      await api.retryJob(incident.jobKey);
+      setActionMessage(`Job ${incident.jobKey} scheduled for retry.`);
+      await fetchIncidents(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to retry job");
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const resolve = async (incident: Incident) => {
+    setActionKey(incident.key);
+    setError(null);
+    setActionMessage(null);
+    try {
+      const resolved = await api.resolveIncident(incident.key);
+      setIncidents((current) => current.map((item) => item.key === incident.key ? resolved : item));
+      setActionMessage(`Incident ${incident.key} resolved.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resolve incident");
+    } finally {
+      setActionKey(null);
+    }
+  };
+
   if (loading) {
-    return <div className="p-4">Loading incidents...</div>;
+    return <div role="status" aria-live="polite" className="p-4">Loading incidents...</div>;
   }
 
   return (
@@ -75,13 +108,14 @@ export default function Incidents() {
       </div>
 
       {error && (
-        <Card>
+        <Card role="alert">
           <CardContent className="flex items-center gap-2 py-4 text-sm text-destructive">
             <AlertTriangle className="h-4 w-4" />
             {error}
           </CardContent>
         </Card>
       )}
+      {actionMessage && <p role="status" aria-live="polite" className="text-sm text-muted-foreground">{actionMessage}</p>}
 
       <Card>
         <CardHeader>
@@ -98,13 +132,14 @@ export default function Incidents() {
                 <TableHead>Instance</TableHead>
                 <TableHead>Job</TableHead>
                 <TableHead>Created</TableHead>
+                <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {incidents.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground">
-                    No incidents.
+                  <TableCell colSpan={7} className="text-center text-muted-foreground">
+                    No incidents require attention.
                   </TableCell>
                 </TableRow>
               ) : (
@@ -131,6 +166,31 @@ export default function Incidents() {
                     </TableCell>
                     <TableCell className="font-mono text-xs">{inc.jobKey || "—"}</TableCell>
                     <TableCell className="text-xs">{formatDate(inc.createdAt)}</TableCell>
+                    <TableCell>
+                      <div className="flex gap-2">
+                        {inc.jobKey && inc.state !== "RESOLVED" ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={actionKey === inc.key}
+                            aria-label={`Retry job ${inc.jobKey} for incident ${inc.key}`}
+                            onClick={() => void retry(inc)}
+                          >
+                            Retry job
+                          </Button>
+                        ) : null}
+                        {inc.state !== "RESOLVED" ? (
+                          <Button
+                            size="sm"
+                            disabled={actionKey === inc.key}
+                            aria-label={`Resolve incident ${inc.key}`}
+                            onClick={() => void resolve(inc)}
+                          >
+                            Resolve
+                          </Button>
+                        ) : null}
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))
               )}

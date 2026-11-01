@@ -110,7 +110,10 @@ export function workflowThroughput(data) {
           const completeRes = http.post(
             `${BASE}/jobs/${jobKey}/complete`,
             JSON.stringify({ worker, variables: { result: "ok" } }),
-            { headers: authHeaders({ "Content-Type": "application/json" }) }
+            {
+              headers: authHeaders({ "Content-Type": "application/json" }),
+              tags: { name: "complete_job" },
+            }
           );
           check(completeRes, {
             "job completed (200/204)": (r) => r.status === 200 || r.status === 204,

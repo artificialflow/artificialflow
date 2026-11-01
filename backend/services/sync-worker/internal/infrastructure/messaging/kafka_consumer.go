@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/logger"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/application"
 	"github.com/artificialflow/artificialflow/backend/services/sync-worker/internal/domain/model"
@@ -29,6 +30,7 @@ type Config struct {
 	DLQTopic          string
 	MaxProcessRetries int
 	RetryBackoff      time.Duration
+	TenantMode        string
 }
 
 type KafkaConsumer struct {
@@ -46,9 +48,12 @@ type KafkaConsumer struct {
 	dlqCount       atomic.Int64
 	lastProcessed  atomic.Int64
 
-	topicMu    sync.RWMutex
-	topicStats map[string]TopicStatsSnapshot
+	topicMu         sync.RWMutex
+	topicStats      map[string]TopicStatsSnapshot
+	processedEvents *recentEventSet
 }
+
+var errBulkItemMismatch = errors.New("bulk response item count does not match planned writes")
 
 func NewKafkaConsumer(cfg Config, service *application.SyncService) *KafkaConsumer {
 	if cfg.MaxProcessRetries < 0 {
@@ -58,12 +63,24 @@ func NewKafkaConsumer(cfg Config, service *application.SyncService) *KafkaConsum
 		cfg.RetryBackoff = 250 * time.Millisecond
 	}
 	return &KafkaConsumer{
-		cfg:        cfg,
-		service:    service,
-		log:        logger.New("kafka-consumer"),
-		tracer:     otel.Tracer("sync-worker/kafka-consumer"),
-		topicStats: make(map[string]TopicStatsSnapshot),
+		cfg:             cfg,
+		service:         service,
+		log:             logger.New("kafka-consumer"),
+		tracer:          otel.Tracer("sync-worker/kafka-consumer"),
+		topicStats:      make(map[string]TopicStatsSnapshot),
+		processedEvents: newRecentEventSet(dedupeWindowSize),
 	}
+}
+
+func (c *KafkaConsumer) Ready(ctx context.Context) error {
+	if len(c.cfg.Brokers) == 0 {
+		return fmt.Errorf("kafka brokers are not configured")
+	}
+	conn, err := kafka.DialContext(ctx, "tcp", c.cfg.Brokers[0])
+	if err != nil {
+		return fmt.Errorf("connect to kafka: %w", err)
+	}
+	return conn.Close()
 }
 
 var errConsumerNeedsRestart = errors.New("kafka consumer needs restart after empty assignment")
@@ -173,14 +190,16 @@ func (c *KafkaConsumer) runGeneration(ctx context.Context) error {
 
 func (c *KafkaConsumer) readerConfig() kafka.ReaderConfig {
 	return kafka.ReaderConfig{
-		Brokers:        c.cfg.Brokers,
-		GroupID:        c.cfg.GroupID,
-		GroupTopics:    c.cfg.Topics,
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		MaxWait:        500 * time.Millisecond,
-		StartOffset:    kafka.FirstOffset,
-		CommitInterval: 0,
+		Brokers:     c.cfg.Brokers,
+		GroupID:     c.cfg.GroupID,
+		GroupTopics: c.cfg.Topics,
+		MinBytes:    1,
+		MaxBytes:    10e6,
+		MaxWait:     500 * time.Millisecond,
+		StartOffset: kafka.FirstOffset,
+		// Synchronous per-message commits cap a replica at a few hundred messages/s.
+		// Periodic commits keep at-least-once delivery; replays re-apply in order.
+		CommitInterval: time.Second,
 		// Debezium creates CDC topics asynchronously after the connector reports
 		// RUNNING. On a fresh cluster the first group assignment can therefore be
 		// empty. Keep watching so topic/partition creation triggers a rebalance
@@ -229,7 +248,7 @@ func (c *KafkaConsumer) consumeLoop(ctx context.Context, r *kafka.Reader) error 
 	})
 
 	for {
-		m, err := r.FetchMessage(ctx)
+		batch, err := c.fetchBatch(ctx, r)
 		if err != nil {
 			// Check if context is done (graceful shutdown)
 			if ctx.Err() != nil {
@@ -249,53 +268,14 @@ func (c *KafkaConsumer) consumeLoop(ctx context.Context, r *kafka.Reader) error 
 			}
 		}
 
-		if len(m.Value) == 0 {
-			if err := r.CommitMessages(ctx, m); err != nil {
-				c.log.Warn(ctx, "failed to commit empty message", map[string]any{
-					"topic":     m.Topic,
-					"partition": m.Partition,
-					"offset":    m.Offset,
-					"error":     err.Error(),
-				})
-			}
-			continue
-		}
-
-		c.processedCount.Add(1)
-		c.lastProcessed.Store(time.Now().UnixNano())
-
-		processErr := c.processMessageWithRetry(ctx, m)
-		if processErr == nil {
-			if err := r.CommitMessages(ctx, m); err != nil {
-				c.log.Warn(ctx, "failed to commit processed message", map[string]any{
-					"topic":     m.Topic,
-					"partition": m.Partition,
-					"offset":    m.Offset,
-					"error":     err.Error(),
-				})
-				continue
-			}
-			continue
-		}
-
-		c.failureCount.Add(1)
-		c.recordTopicOutcome(m.Topic, m.Offset, processErr)
-
-		if err := c.publishDLQ(ctx, m, processErr); err != nil {
-			c.log.Error(ctx, "failed to publish message to dlq; leaving message uncommitted", map[string]any{
-				"topic":     m.Topic,
-				"partition": m.Partition,
-				"offset":    m.Offset,
-				"error":     err.Error(),
-			})
-			continue
-		}
-
-		if err := r.CommitMessages(ctx, m); err != nil {
-			c.log.Warn(ctx, "failed to commit dlq-published message", map[string]any{
-				"topic":     m.Topic,
-				"partition": m.Partition,
-				"offset":    m.Offset,
+		c.processBatch(ctx, batch)
+		if err := r.CommitMessages(ctx, batch...); err != nil {
+			last := batch[len(batch)-1]
+			c.log.Warn(ctx, "failed to commit processed batch", map[string]any{
+				"messages":  len(batch),
+				"topic":     last.Topic,
+				"partition": last.Partition,
+				"offset":    last.Offset,
 				"error":     err.Error(),
 			})
 		}
@@ -374,6 +354,21 @@ func (c *KafkaConsumer) processMessageOnce(ctx context.Context, m kafka.Message)
 	eventType := carrier.Get("type")
 
 	if eventType != "" {
+		tenantID, err := resolveEventTenant(carrier.Get("tenant_id"), c.cfg.TenantMode)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "tenant resolution failed")
+			return err
+		}
+		eventID := strings.TrimSpace(carrier.Get("event_id"))
+		dedupeKey := ""
+		if eventID != "" {
+			dedupeKey = tenantID + "\x00" + eventID
+			if c.eventAlreadyProcessed(dedupeKey) {
+				return nil
+			}
+		}
+		msgCtx = auth.WithPrincipal(msgCtx, auth.Principal{TenantID: tenantID, Subject: "sync-worker"})
 		// Protobuf Event Path
 		c.log.Debug(msgCtx, "received protobuf event", map[string]any{
 			"type":  eventType,
@@ -389,6 +384,9 @@ func (c *KafkaConsumer) processMessageOnce(ctx context.Context, m kafka.Message)
 			})
 			c.recordTopicOutcome(m.Topic, m.Offset, err)
 			return err
+		}
+		if dedupeKey != "" {
+			c.markEventProcessed(dedupeKey)
 		}
 	} else {
 		// Legacy Debezium Path
@@ -435,6 +433,24 @@ func (c *KafkaConsumer) processMessageOnce(ctx context.Context, m kafka.Message)
 	})
 
 	return nil
+}
+
+func resolveEventTenant(raw, mode string) (string, error) {
+	if tenantID := strings.TrimSpace(raw); tenantID != "" {
+		return tenantID, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(mode), "strict") {
+		return "", fmt.Errorf("event tenant_id is required in strict tenant mode")
+	}
+	return auth.DefaultTenantID, nil
+}
+
+func (c *KafkaConsumer) eventAlreadyProcessed(key string) bool {
+	return c.processedEvents.contains(key)
+}
+
+func (c *KafkaConsumer) markEventProcessed(key string) {
+	c.processedEvents.add(key)
 }
 
 func (c *KafkaConsumer) publishDLQ(ctx context.Context, m kafka.Message, processErr error) error {

@@ -1,0 +1,13 @@
+# Sourced by the nginx image entrypoint before templates are rendered.
+# Exports OIDC_CSP_ORIGIN: the scheme://host[:port] of the OIDC provider the
+# browser talks to (discovery, token, userinfo, silent renew), or empty when
+# IAM_DEPLOYMENT_MODE is not true.
+OIDC_CSP_ORIGIN=""
+if [ "${IAM_DEPLOYMENT_MODE:-}" = "true" ] && [ -n "${OIDC_AUTHORITY:-}" ]; then
+  OIDC_CSP_ORIGIN="$(printf '%s' "$OIDC_AUTHORITY" | sed -E -n 's#^(https?://[A-Za-z0-9.-]+(:[0-9]+)?)(/.*)?$#\1#p')"
+  if [ -z "$OIDC_CSP_ORIGIN" ]; then
+    echo "oidc-csp: OIDC_AUTHORITY \"$OIDC_AUTHORITY\" is not an http(s) URL" >&2
+    exit 1
+  fi
+fi
+export OIDC_CSP_ORIGIN

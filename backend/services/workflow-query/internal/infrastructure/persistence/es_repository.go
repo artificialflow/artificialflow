@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/artificialflow/artificialflow/backend/libs/auth"
 	"github.com/artificialflow/artificialflow/backend/libs/model"
 	"github.com/artificialflow/artificialflow/backend/libs/search"
 	"github.com/artificialflow/artificialflow/backend/services/workflow-query/internal/domain/repository"
@@ -30,6 +31,22 @@ const (
 	// globally sort them without allowing a new canonical index to hide legacy data.
 	transitionMergeMaxDocuments = 10_000
 )
+
+func tenantFilter(ctx context.Context) map[string]any {
+	tenant := auth.TenantIDFromContext(ctx)
+	if tenant != auth.DefaultTenantID {
+		return map[string]any{"term": map[string]any{"tenant_id": tenant}}
+	}
+	// Existing 1.x projection documents may predate tenant_id. They belong only
+	// to the reserved default tenant during the compatibility window.
+	return map[string]any{"bool": map[string]any{
+		"minimum_should_match": 1,
+		"should": []any{
+			map[string]any{"term": map[string]any{"tenant_id": auth.DefaultTenantID}},
+			map[string]any{"bool": map[string]any{"must_not": map[string]any{"exists": map[string]any{"field": "tenant_id"}}}},
+		},
+	}}
+}
 
 // Ensure implementation
 var _ repository.QueryRepository = &ESRepository{}
@@ -57,9 +74,10 @@ func (r *ESRepository) GetInstance(ctx context.Context, id string) (*model.Proce
 	// Search by exact key match
 	queryMap := map[string]any{
 		"query": map[string]any{
-			"term": map[string]any{
-				"key": instanceKey,
-			},
+			"bool": map[string]any{"filter": []any{
+				map[string]any{"term": map[string]any{"key": instanceKey}},
+				tenantFilter(ctx),
+			}},
 		},
 	}
 
@@ -113,7 +131,8 @@ func (r *ESRepository) GetInstance(ctx context.Context, id string) (*model.Proce
 		Version:                  src.Version,
 		ParentProcessInstanceKey: src.ParentProcessInstanceKey,
 		ParentElementInstanceKey: src.ParentElementInstanceKey,
-		State:                    src.State,
+		State:                    model.ProcessInstanceState(src.State),
+		TenantID:                 src.TenantID,
 		CreatedAt:                src.CreatedAt,
 		EndTime:                  src.EndTime,
 		Context:                  src.Context,
@@ -126,7 +145,7 @@ func (r *ESRepository) SearchInstances(ctx context.Context, filter repository.In
 		return nil, err
 	}
 
-	filterClauses := make([]map[string]any, 0, 2)
+	filterClauses := []map[string]any{tenantFilter(ctx)}
 	if filter.WorkflowID != "" {
 		workflowKey, err := strconv.ParseInt(filter.WorkflowID, 10, 64)
 		if err != nil {
@@ -162,6 +181,10 @@ func (r *ESRepository) SearchInstances(ctx context.Context, filter repository.In
 			{"key": "desc"},
 		},
 	}
+	if r.legacyInstanceIndex == "" {
+		searchBody["from"] = from
+		searchBody["size"] = to - from
+	}
 
 	bodyBytes, err := json.Marshal(searchBody)
 	if err != nil {
@@ -177,6 +200,17 @@ func (r *ESRepository) SearchInstances(ctx context.Context, filter repository.In
 	)
 	if err != nil {
 		return nil, err
+	}
+	if r.legacyInstanceIndex == "" {
+		page, total, err := decodePageSearch[esProcessInstance](results.canonical)
+		if err != nil {
+			return nil, err
+		}
+		instances := make([]model.ProcessInstance, 0, len(page))
+		for _, source := range page {
+			instances = append(instances, mapProcessInstance(source))
+		}
+		return &repository.InstanceSearchResult{Instances: instances, Total: total}, nil
 	}
 
 	canonical, err := decodeCompleteSearch[esProcessInstance](results.canonical, r.instanceIndex)
@@ -222,9 +256,7 @@ func (r *ESRepository) SearchWorkflows(ctx context.Context, filter repository.Wo
 	}
 
 	searchBody := map[string]any{
-		"query": map[string]any{
-			"match_all": map[string]any{},
-		},
+		"query":            map[string]any{"bool": map[string]any{"filter": []any{tenantFilter(ctx)}}},
 		"from":             0,
 		"size":             transitionMergeMaxDocuments,
 		"track_total_hits": true,
@@ -232,6 +264,10 @@ func (r *ESRepository) SearchWorkflows(ctx context.Context, filter repository.Wo
 			{"created_at": "desc"},
 			{"key": "desc"},
 		},
+	}
+	if r.legacyProcessIndex == "" {
+		searchBody["from"] = from
+		searchBody["size"] = to - from
 	}
 
 	bodyBytes, err := json.Marshal(searchBody)
@@ -248,6 +284,17 @@ func (r *ESRepository) SearchWorkflows(ctx context.Context, filter repository.Wo
 	)
 	if err != nil {
 		return nil, err
+	}
+	if r.legacyProcessIndex == "" {
+		page, total, err := decodePageSearch[esProcess](results.canonical)
+		if err != nil {
+			return nil, err
+		}
+		workflows := make([]model.Process, 0, len(page))
+		for _, source := range page {
+			workflows = append(workflows, mapProcess(source))
+		}
+		return &repository.WorkflowSearchResult{Workflows: workflows, Total: total}, nil
 	}
 
 	canonical, err := decodeCompleteSearch[esProcess](results.canonical, r.processIndex)
@@ -354,6 +401,21 @@ func searchResultHasHits(result json.RawMessage) (bool, error) {
 	return len(response.Hits.Hits) > 0, nil
 }
 
+func decodePageSearch[T any](result json.RawMessage) ([]T, int64, error) {
+	if len(result) == 0 {
+		return []T{}, 0, nil
+	}
+	response := esSearchResponse[T]{}
+	if err := json.Unmarshal(result, &response); err != nil {
+		return nil, 0, fmt.Errorf("failed to unmarshal ES response: %w", err)
+	}
+	sources := make([]T, 0, len(response.Hits.Hits))
+	for _, hit := range response.Hits.Hits {
+		sources = append(sources, hit.Source)
+	}
+	return sources, response.Hits.Total.Value, nil
+}
+
 func decodeCompleteSearch[T any](result json.RawMessage, index string) ([]T, error) {
 	if len(result) == 0 {
 		return nil, nil
@@ -426,7 +488,7 @@ func mapProcessInstance(source esProcessInstance) model.ProcessInstance {
 		Version:                  source.Version,
 		ParentProcessInstanceKey: source.ParentProcessInstanceKey,
 		ParentElementInstanceKey: source.ParentElementInstanceKey,
-		State:                    source.State,
+		State:                    model.ProcessInstanceState(source.State),
 		CreatedAt:                source.CreatedAt,
 		EndTime:                  source.EndTime,
 		Context:                  source.Context,
@@ -465,6 +527,7 @@ type esProcessInstance struct {
 	ParentProcessInstanceKey int64          `json:"parent_process_instance_key"`
 	ParentElementInstanceKey int64          `json:"parent_element_instance_key"`
 	State                    string         `json:"state"`
+	TenantID                 string         `json:"tenant_id"`
 	CreatedAt                time.Time      `json:"created_at"`
 	EndTime                  time.Time      `json:"end_time"`
 	Context                  map[string]any `json:"context"`

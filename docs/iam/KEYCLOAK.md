@@ -1,14 +1,17 @@
 # External IAM: Keycloak
 
+Set `IAM_DEPLOYMENT_MODE=true` (Helm: `iam.mode: true`, the default) and then:
+
 1. Create realm (or use existing).
 2. Create confidential client `workflow-backend` (audience / client id for API).
 3. Create public PKCE client `workflow-frontend` with redirect URIs:
    - `https://<artificialflow-origin>/`
    - silent / post-logout same origin
 4. Create roles (exact names):
-   - `artificialflow admin`
-   - `artificialflow modeler`
-   - `artificialflow client`
+   - `artificialflowadmin`
+   - `artificialflowbusiness`
+   - `artificialflowclient`
+   - `artificialflowanalytics`
 5. Map realm/client roles into a token claim path ArtificialFlow can read, for example `realm_access.roles`, or set:
 
 ```text

@@ -1,57 +1,34 @@
-# Production-oriented example: ArtificialFlow with externally managed dependencies.
-# GitHub #35 — copy and adapt; do not commit real secrets.
+# ArtificialFlow with externally managed Postgres, Elasticsearch, Kafka, and Debezium Connect.
+# Copy and adapt; do not commit real secrets.
 #
-# helm upgrade --install artificialflow ./charts/artificialflow \
-#   -f charts/artificialflow/examples/values-managed-deps.yaml \
-#   -f secrets.yaml
-
-replicaCount:
-  command: 2
-  query: 2
-  runtime: 1
-  syncWorker: 2
-  frontend: 2
-  gateway: 2
-
-postgresql:
-  enabled: false
-
-kafka:
-  enabled: false
-
-elasticsearch:
-  enabled: false
-
-debezium:
-  enabled: false
-
-external:
-  postgres:
-    host: postgres.db.svc.cluster.local
-    port: 5432
-    database: artificialflow
-    # username/password via existingSecret
-  kafka:
-    brokers: "kafka-1.msg.svc:9092,kafka-2.msg.svc:9092"
-  elasticsearch:
-    addresses: "https://es.logging.svc:9200"
+#   helm upgrade --install artificialflow ./charts/artificialflow \
+#     -f charts/artificialflow/examples/values-managed-deps.yaml
 
 iam:
-  mode: external
+  mode: true
   auth:
-    issuer: https://login.example.com/realms/artificialflow
+    issuerInternalUrl: https://login.example.com/realms/artificialflow
+    issuerPublicUrl: https://login.example.com/realms/artificialflow
     clientId: workflow-backend
     claimRolesPath: realm_access.roles,roles
+  frontend:
+    oidcClientId: workflow-frontend
 
-ingress:
-  enabled: true
-  className: nginx
-  hosts:
-    - host: artificialflow.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: artificialflow-tls
-      hosts:
-        - artificialflow.example.com
+postgresql:
+  bundled: {enabled: false}
+  host: postgres.db.svc.cluster.local
+  database: artificialflow
+  sslMode: require
+  existingSecret: artificialflow-pg # keys: PG_DSN, POSTGRES_PASSWORD (Debezium)
+
+search:
+  bundled: {enabled: false}
+  address: https://es.logging.svc:9200
+
+kafka:
+  bundled: {enabled: false}
+  brokers: kafka-1.msg.svc:9092,kafka-2.msg.svc:9092
+
+connect:
+  bundled: {enabled: false}
+  url: http://debezium-connect.msg.svc:8083

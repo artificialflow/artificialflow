@@ -6,23 +6,23 @@ import './index.css'
 import App from './App.tsx'
 import { runtimeConfig } from './lib/runtimeConfig';
 
-const authority = runtimeConfig.oidcAuthority || import.meta.env.VITE_OIDC_AUTHORITY || "";
-const clientID = runtimeConfig.oidcClientId || import.meta.env.VITE_OIDC_CLIENT_ID || "";
+const authority = runtimeConfig.oidcAuthority;
+const clientID = runtimeConfig.oidcClientId;
 
 function bootstrap() {
-  const authConfigured = Boolean(authority && clientID);
+  const iamMode = runtimeConfig.iamMode;
+  const oidcConfigured = Boolean(authority && clientID);
+  const authConfigured = iamMode === true || (iamMode === null && oidcConfigured);
   const oidcConfig = {
     authority,
     client_id: clientID,
     redirect_uri: window.location.origin,
-    // Must match a registered ZITADEL redirect URI (bundled bootstrap uses origin).
     silent_redirect_uri: window.location.origin,
     post_logout_redirect_uri: window.location.origin,
     response_type: "code",
     scope: "openid profile email",
     automaticSilentRenew: true,
     includeIdTokenInSilentRenew: true,
-    // check_session_iframe is flaky across browsers/ZITADEL and falsely signs users out.
     monitorSession: false,
     // Survive hard refresh better than default sessionStorage.
     userStore: new WebStorageStateStore({ store: window.localStorage }),
@@ -37,7 +37,11 @@ function bootstrap() {
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      {authConfigured ? (
+      {authConfigured && !oidcConfigured ? (
+        <div className="flex h-screen items-center justify-center p-6 text-center text-sm text-muted-foreground">
+          IAM_DEPLOYMENT_MODE=true but FRONTEND_AUTH_OIDC_AUTHORITY / FRONTEND_AUTH_OIDC_CLIENT_ID are not set.
+        </div>
+      ) : authConfigured ? (
         <AuthProvider {...oidcConfig}>
           <App />
         </AuthProvider>
