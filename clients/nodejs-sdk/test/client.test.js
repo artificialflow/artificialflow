@@ -427,9 +427,27 @@ async function testDecisionIncidentRetryOperations() {
   assert.deepStrictEqual(body(calls[4]), { retries: 5 });
 }
 
+async function testTrailingSlashBaseUrl() {
+  const calls = [];
+  const client = new ArtificialFlowClient({
+    baseUrl: 'http://artificialflow.local/api///',
+    queryBaseUrl: 'http://artificialflow.local/api/query/',
+    fetch: async (url, init = {}) => {
+      calls.push({ url, init });
+      return jsonResponse(200, { status: 'ok' });
+    },
+  });
+
+  await client.health();
+  await client.queryHealth();
+  assert.strictEqual(calls[0].url, 'http://artificialflow.local/api/health');
+  assert.strictEqual(calls[1].url, 'http://artificialflow.local/api/query/health');
+}
+
 async function main() {
   testCanonicalExportsAndEnvironmentPrecedence();
   await testHealthAuthHeaders();
+  await testTrailingSlashBaseUrl();
   await testAllWorkflowOperations();
   await testAllInstanceOperations();
   await testUserTaskOperations();
