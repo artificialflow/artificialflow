@@ -14,7 +14,7 @@
   "sdks": [
     {"ecosystem": "npm", "name": "@artificialflow/nodejs-sdk", "path": "clients/nodejs-sdk", "sbom": "cyclonedx", "provenance": true},
     {"ecosystem": "nuget", "name": "ArtificialFlow.Sdk", "path": "clients/dotnet-sdk", "sbom": "cyclonedx", "provenance": true},
-    {"ecosystem": "maven", "name": "io.artificialflow:artificialflow-sdk", "path": "clients/java-sdk", "sbom": "cyclonedx", "provenance": true}
+    {"ecosystem": "maven", "name": "io.github.artificialflow:artificialflow-sdk", "path": "clients/java-sdk", "sbom": "cyclonedx", "provenance": true}
   ],
   "releaseMetadata": [
     {"name": "release-notes", "source": "CHANGELOG.md", "required": true},

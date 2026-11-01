@@ -72,7 +72,7 @@ only event transport.
 | :--- | :--- | :--- | :--- |
 | Node.js | `@artificialflow/nodejs-sdk@1.2.0` | Node.js 20+ | Full API, workers, user tasks |
 | .NET | `ArtificialFlow.Sdk` `1.2.0` | .NET 8 | Full API, workers, user tasks |
-| Java | `io.artificialflow:artificialflow-sdk:1.2.0` | Java 17+ | Full API, workers, user tasks |
+| Java | `io.github.artificialflow:artificialflow-sdk:1.2.0` | Java 17+ | Full API, workers, user tasks |
 | Python worker | `artificialflow-worker` `0.1.0` (install from source) | Python 3.10+ | Worker protocol only |
 | Go worker | `backend/libs/worker` (versioned with the platform) | Go 1.26 | Worker protocol only |
 

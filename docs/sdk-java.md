@@ -1,6 +1,6 @@
 # Java SDK
 
-Artifact: `io.artificialflow:artificialflow-sdk` (Java 17, Jackson only).
+Artifact: `io.github.artificialflow:artificialflow-sdk` (Java 17, Jackson only).
 
 The SDK talks to the gateway over HTTP only and mirrors the
 [Node.js SDK](sdk-nodejs.md): method names are the OpenAPI `operationId`s.
@@ -11,7 +11,7 @@ Full contract: [API.md](API.md). Package README and examples:
 
 ```xml
 <dependency>
-  <groupId>io.artificialflow</groupId>
+  <groupId>io.github.artificialflow</groupId>
   <artifactId>artificialflow-sdk</artifactId>
   <version>1.2.0</version>
 </dependency>

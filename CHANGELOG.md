@@ -103,7 +103,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
   shows a local login (`admin` / `admin` by default, set with
   `CONSOLE_ADMIN_USERNAME` / `CONSOLE_ADMIN_PASSWORD`) backed by
   `POST /identity/login`. The API and SDKs still need no token in that mode.
-- .NET (`ArtificialFlow.Sdk`) and Java (`io.artificialflow:artificialflow-sdk`) REST SDKs
+- .NET (`ArtificialFlow.Sdk`) and Java (`io.github.artificialflow:artificialflow-sdk`) REST SDKs
   with OAuth client-credentials auth and polling job workers.
 - Helm `values-kind-smoke.yaml` and real `*.bundled` keys for managed
   dependencies.

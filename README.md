@@ -191,7 +191,7 @@ hardening.
 | :--- | :--- | :--- | :--- |
 | Node.js / TypeScript | Full API, workers, user tasks | `npm install @artificialflow/nodejs-sdk` | [Node.js SDK](docs/sdk-nodejs.md) |
 | .NET 8 | Full API, workers, user tasks | `dotnet add package ArtificialFlow.Sdk` | [.NET SDK](docs/sdk-dotnet.md) |
-| Java 17 | Full API, workers, user tasks | Maven `io.artificialflow:artificialflow-sdk:1.2.0` | [Java SDK](docs/sdk-java.md) |
+| Java 17 | Full API, workers, user tasks | Maven `io.github.artificialflow:artificialflow-sdk:1.2.0` | [Java SDK](docs/sdk-java.md) |
 | Python 3.10+ | Workers only | `pip install -e clients/python-sdk` | [Python worker](docs/sdk-python.md) |
 | Go | Workers only | `github.com/artificialflow/artificialflow/backend/libs/worker` | [Go worker](docs/sdk-go.md) |
 

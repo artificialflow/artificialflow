@@ -36,7 +36,7 @@ accepted. Scope is operation + job key (for example `jobs.complete:{jobKey}`).
 | Any (raw HTTP) | [API.md](API.md#worker--jobs-api) |
 | Node.js | [`@artificialflow/nodejs-sdk`](sdk-nodejs.md) `createWorker` |
 | .NET | [`ArtificialFlow.Sdk`](sdk-dotnet.md) `JobWorker` |
-| Java | [`io.artificialflow:artificialflow-sdk`](sdk-java.md) `JobWorker` |
+| Java | [`io.github.artificialflow:artificialflow-sdk`](sdk-java.md) `JobWorker` |
 | Python | [`artificialflow-worker`](sdk-python.md) `Worker` |
 | Go | [`backend/libs/worker`](sdk-go.md) `NewWorker` |
 
