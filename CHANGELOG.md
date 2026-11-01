@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-01
+
 ### Breaking
 
 - Removed the bundled IAM provider and the in-app `/identity/management/*`
@@ -165,7 +167,6 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
   use the real keys.
 - Transactional engine copies no longer copy the outbox-count mutex, which
   could deadlock a transaction started while the relay held the lock.
-## [1.2.0] - 2026-08-09
 
 ### Added
 
